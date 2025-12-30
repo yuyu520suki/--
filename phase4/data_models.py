@@ -29,6 +29,10 @@ class GridInput:
     z_heights: List[float]    # 层高 [mm]
     q_dead: float = 25.0      # 恒载 (kN/m)
     q_live: float = 10.0      # 活载 (kN/m)
+    # 风荷载和雪荷载参数 (可选)
+    w0: float = 0.0           # 基本风压 (kN/m²), 0表示不考虑
+    s0: float = 0.0           # 基本雪压 (kN/m²), 0表示不考虑
+    terrain: str = 'B'        # 地面粗糙度类别 (A/B/C/D)
     
     @property
     def num_spans(self) -> int:
@@ -64,6 +68,16 @@ class GridInput:
     def num_columns(self) -> int:
         """柱总数: (跨数+1) × 层数"""
         return (self.num_spans + 1) * self.num_stories
+    
+    @property
+    def has_wind(self) -> bool:
+        """是否考虑风荷载"""
+        return self.w0 > 0
+    
+    @property
+    def has_snow(self) -> bool:
+        """是否考虑雪荷载 (仅施加于屋面梁)"""
+        return self.s0 > 0
 
 
 @dataclass
@@ -106,6 +120,53 @@ class ElementForces:
     def N_design(self) -> float:
         """设计轴力: 取绝对值最大值"""
         return max(abs(self.axial_max), abs(self.axial_min))
+
+
+@dataclass
+class ElementForcesEnvelope:
+    """
+    单元内力包络结果 (多工况分析)
+    
+    Attributes:
+        element_id: 单元编号
+        element_type: 单元类型 ('beam' 或 'column')
+        length: 单元长度 (mm)
+        M_uls_max: ULS最大弯矩 (kN·m)
+        M_uls_min: ULS最小弯矩 (kN·m)
+        V_uls_max: ULS最大剪力 (kN)
+        N_uls_max: ULS最大轴力 (kN)
+        N_uls_min: ULS最小轴力 (kN)
+        M_sls: SLS弯矩 (准永久组合, kN·m)
+        controlling_combo: 控制工况名称
+    """
+    element_id: int
+    element_type: str
+    length: float
+    # ULS 控制内力
+    M_uls_max: float = 0.0
+    M_uls_min: float = 0.0
+    V_uls_max: float = 0.0
+    N_uls_max: float = 0.0
+    N_uls_min: float = 0.0
+    # SLS 控制内力 (准永久组合)
+    M_sls: float = 0.0
+    # 控制工况
+    controlling_combo: str = ''
+    
+    @property
+    def M_design(self) -> float:
+        """设计弯矩: ULS最大绝对值"""
+        return max(abs(self.M_uls_max), abs(self.M_uls_min))
+    
+    @property
+    def V_design(self) -> float:
+        """设计剪力"""
+        return abs(self.V_uls_max)
+    
+    @property
+    def N_design(self) -> float:
+        """设计轴力: ULS最大绝对值"""
+        return max(abs(self.N_uls_max), abs(self.N_uls_min))
 
 
 @dataclass

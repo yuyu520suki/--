@@ -182,9 +182,41 @@ def generate_word_report(result: OptimizationResult,
     doc.add_heading('2.2 荷载信息', level=2)
     doc.add_paragraph(f'• 恒载 (Dead Load): {grid.q_dead} kN/m')
     doc.add_paragraph(f'• 活载 (Live Load): {grid.q_live} kN/m')
-    doc.add_paragraph('• 荷载组合: 1.2×恒载 + 1.4×活载')
+    if hasattr(grid, 'w0') and grid.w0 > 0:
+        doc.add_paragraph(f'• 基本风压: {grid.w0} kN/m² (GB 50009-2012)')
+    if hasattr(grid, 's0') and grid.s0 > 0:
+        doc.add_paragraph(f'• 基本雪压: {grid.s0} kN/m² (GB 50009-2012)')
     
-    doc.add_heading('2.3 计算方法', level=2)
+    doc.add_heading('2.3 荷载组合 (GB 50009-2012)', level=2)
+    combo_table = doc.add_table(rows=1, cols=2)
+    combo_table.style = 'Table Grid'
+    combo_hdr = combo_table.rows[0].cells
+    combo_hdr[0].text = '极限状态'
+    combo_hdr[1].text = '荷载组合'
+    
+    combos = [
+        ('承载能力 ULS', '1.2G+1.4Q, 1.35G+0.98Q'),
+        ('正常使用 SLS', 'G+Q (标准), G+0.4Q (准永久)'),
+    ]
+    if hasattr(grid, 'w0') and grid.w0 > 0:
+        combos[0] = ('承载能力 ULS', '1.2G+1.4Q, 1.2G+1.4W, 1.2G+0.98Q+1.4W')
+    if hasattr(grid, 's0') and grid.s0 > 0:
+        combos[0] = ('承载能力 ULS', combos[0][1] + ', 1.2G+1.4S')
+    
+    for state, combo in combos:
+        row = combo_table.add_row().cells
+        row[0].text = state
+        row[1].text = combo
+    
+    doc.add_heading('2.4 验算项目 (GB 50010-2010)', level=2)
+    doc.add_paragraph('• 正截面承载力验算 (受弯、偏压)')
+    doc.add_paragraph('• 斜截面承载力验算 (受剪)')
+    doc.add_paragraph('• 柱轴压比限值验算 (μ ≤ 0.9)')
+    doc.add_paragraph('• 最小/最大配筋率检查')
+    doc.add_paragraph('• 挠度限值验算 (l/200~l/250)')
+    doc.add_paragraph('• 裂缝宽度限值验算 (≤0.3mm)')
+    
+    doc.add_heading('2.5 计算方法', level=2)
     doc.add_paragraph('• 内力分析: 采用矩阵位移法 (anaStruct有限元内核)')
     doc.add_paragraph('• 截面设计: 采用遗传算法 (PyGAD) 进行全局优化')
     doc.add_paragraph('• 承载力验算: 考虑P-M相互作用 (柱) 和双向受力 (梁)')
@@ -241,7 +273,19 @@ def generate_word_report(result: OptimizationResult,
             doc.add_heading('4.3 优化收敛过程', level=2)
             doc.add_picture(image_paths['conv'], width=Cm(12))
             doc.add_paragraph('图 4-3: 遗传算法造价收敛曲线')
-            doc.add_paragraph(f'收敛代数: 约第 {len(result.fitness_history)//2} 代进入稳定期')
+            
+            # 动态计算收敛代数 (变化率小于1%时认为收敛)
+            if result.convergence_history and len(result.convergence_history) > 5:
+                history = result.convergence_history
+                final_cost = history[-1]
+                convergence_gen = len(history)
+                for i in range(len(history) - 1):
+                    if abs(history[i] - final_cost) / final_cost < 0.01:
+                        convergence_gen = i + 1
+                        break
+                doc.add_paragraph(f'收敛代数: 约第 {convergence_gen} 代进入稳定期 (变化率<1%)')
+            else:
+                doc.add_paragraph(f'总迭代代数: {len(result.fitness_history)} 代')
 
     doc.save(output_path)
     print(f"✓ Word设计计算书已保存: {output_path}")
@@ -417,22 +461,29 @@ def _draw_moment_diagram_standard(ax, forces: Dict, model, scale: float, color: 
             x1, z1 = model.nodes[start]
             x2, z2 = model.nodes[end]
             
-            # 梁弯矩图：两端为负（固支端），跨中为正
-            # 使用抛物线插值
+            # 梁弯矩图：端部为负弯矩(moment_min)，跨中为正弯矩(moment_max)
+            # 均布荷载下呈抛物线分布
             L = (x2 - x1) / 1000  # 跨度(m)
-            n_pts = 20
-            x_pts = np.linspace(x1/1000, x2/1000, n_pts)
+            n_pts = 30  # 增加点数使曲线更光滑
             
-            # 简化：假设端部弯矩为负，跨中弯矩为正
-            M_end = -f.moment_max * scale  # 端部
-            M_mid = f.M_design * scale     # 跨中
+            # 端部弯矩（负值，使用moment_min）和跨中弯矩（正值，使用moment_max）
+            M_left = f.moment_min * scale   # 左端弯矩 (通常为负)
+            M_right = f.moment_min * scale  # 右端弯矩 (假设对称)
+            M_mid = f.moment_max * scale    # 跨中弯矩 (通常为正)
             
-            # 抛物线插值 (简化为二次曲线)
+            # 使用三点抛物线插值: y = at² + bt + c
+            # t=0: M_left, t=0.5: M_mid, t=1: M_right
+            # 解出系数
+            c = M_left
+            a = 2 * (M_left + M_right - 2 * M_mid)
+            b = M_right - M_left - a
+            
             t = np.linspace(0, 1, n_pts)
-            M_pts = M_end + 4 * (M_mid + M_end) * t * (1 - t)
+            M_pts = a * t**2 + b * t + c
             
+            x_pts = np.linspace(x1/1000, x2/1000, n_pts)
             z_base = z1/1000
-            z_pts = z_base - M_pts  # 正弯矩向下
+            z_pts = z_base - M_pts  # 正弯矩向下绘制
             
             # 绘制弯矩图轮廓
             x_fill = np.concatenate([[x1/1000], x_pts, [x2/1000]])
@@ -441,12 +492,20 @@ def _draw_moment_diagram_standard(ax, forces: Dict, model, scale: float, color: 
             ax.plot(x_pts, z_pts, color=color, linewidth=1.5)
             
             # 标注端点值
+            # 注意：这里简化假设两端弯矩近似相等（均为负弯矩M_min）
+            # 实际上外跨梁两端弯矩可能差异较大
             ax.annotate(f'{abs(f.moment_min):.0f}', 
                        xy=(x1/1000, z_base), xytext=(x1/1000-0.2, z_base+0.2),
                        fontsize=7, color=color)
-            ax.annotate(f'{abs(f.moment_max):.0f}', 
+            ax.annotate(f'{abs(f.moment_min):.0f}', 
                        xy=(x2/1000, z_base), xytext=(x2/1000+0.1, z_base+0.2),
                        fontsize=7, color=color)
+            
+            # 标注跨中弯矩
+            x_mid = (x1 + x2) / 2000
+            z_mid = z_base - M_mid
+            ax.text(x_mid, z_mid - 0.3, f'{abs(f.moment_max):.0f}', 
+                   ha='center', va='top', fontsize=7, color=color)
             # 标注跨中值
             ax.annotate(f'{f.M_design:.0f}', 
                        xy=((x1+x2)/2000, z_base - M_mid), 

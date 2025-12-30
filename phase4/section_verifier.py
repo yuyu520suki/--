@@ -273,7 +273,213 @@ class SectionVerifier:
                 ratios[elem_id] = ratio
         
         return ratios
-
+    
+    # =========================================================================
+    # 新增验算方法 (GB 50010-2010)
+    # =========================================================================
+    
+    def check_axial_ratio(self, section_idx: int, nu: float) -> float:
+        """
+        轴压比限值验算 (GB 50010-2010 表11.4.16)
+        
+        非抗震时，轴压比限值 μ = N / (fc * A) ≤ 0.9
+        
+        Args:
+            section_idx: 截面索引
+            nu: 设计轴力 (kN), 压力为正
+            
+        Returns:
+            惩罚值: 0表示满足，>0表示超限
+        """
+        sec = self.db.get_by_index(section_idx)
+        fc = 14.3  # MPa (C30)
+        Ag = sec['b'] * sec['h']  # mm²
+        
+        mu_limit = 0.9  # 非抗震限值
+        mu_actual = abs(nu) * 1000 / (fc * Ag)  # 轴压比
+        
+        if mu_actual > mu_limit:
+            return (mu_actual - mu_limit) * 2.0  # 超限惩罚
+        return 0.0
+    
+    def check_deflection(self, span: float, delta: float, 
+                         element_type: str = 'beam') -> float:
+        """
+        挠度限值验算 (GB 50010-2010 表3.4.3)
+        
+        限值:
+        - 梁 (l ≤ 7m): l/200
+        - 梁 (l > 7m): l/250
+        - 悬挑构件: l/250
+        
+        Args:
+            span: 跨度 (mm)
+            delta: 挠度 (mm)
+            element_type: 构件类型
+            
+        Returns:
+            惩罚值: 0表示满足，>0表示超限
+        """
+        # 确定挠度限值
+        if element_type == 'cantilever':
+            limit = span / 250
+        elif span <= 7000:
+            limit = span / 200
+        else:
+            limit = span / 250
+        
+        if abs(delta) > limit:
+            return (abs(delta) / limit - 1.0) * 0.5
+        return 0.0
+    
+    def check_crack_width(self, wmax: float, 
+                          env_class: str = 'II-a') -> float:
+        """
+        裂缝宽度验算 (GB 50010-2010 表3.4.5)
+        
+        最大裂缝宽度限值:
+        - I 类环境: 0.4mm
+        - II-a 类环境: 0.3mm
+        - II-b 类环境: 0.2mm
+        - III 类环境: 0.2mm
+        
+        Args:
+            wmax: 最大裂缝宽度 (mm)
+            env_class: 环境类别
+            
+        Returns:
+            惩罚值: 0表示满足，>0表示超限
+        """
+        limits = {
+            'I': 0.4,
+            'II-a': 0.3,
+            'II-b': 0.2,
+            'III-a': 0.2,
+            'III-b': 0.2,
+        }
+        wlim = limits.get(env_class, 0.3)
+        
+        if wmax > wlim:
+            return (wmax / wlim - 1.0) * 0.5
+        return 0.0
+    
+    def check_min_reinforcement(self, section_idx: int, As: float,
+                                element_type: str = 'beam') -> float:
+        """
+        最小配筋率检查 (GB 50010-2010 表8.5.1)
+        
+        最小配筋率:
+        - 梁受拉区: ρmin = max(0.2%, 45*ft/fy)
+        - 柱全截面: ρmin = 0.6%
+        
+        Args:
+            section_idx: 截面索引
+            As: 配筋面积 (mm²)
+            element_type: 构件类型
+            
+        Returns:
+            惩罚值: 0表示满足，>0表示不足
+        """
+        sec = self.db.get_by_index(section_idx)
+        
+        if element_type == 'beam':
+            # 受拉区配筋率 (按 b*h0 计算)
+            h0 = sec['h'] - 40  # 有效高度
+            A_eff = sec['b'] * h0
+            rho = As / A_eff * 100  # %
+            
+            # ft=1.43 MPa (C30), fy=360 MPa
+            rho_min = max(0.2, 45 * 1.43 / 360 * 100)  # ≈ 0.2%
+        else:
+            # 柱全截面配筋率
+            Ag = sec['b'] * sec['h']
+            rho = As / Ag * 100  # %
+            rho_min = 0.6  # %
+        
+        if rho < rho_min:
+            return (rho_min - rho) / rho_min * 0.3
+        return 0.0
+    
+    def check_max_reinforcement(self, section_idx: int, As: float,
+                                element_type: str = 'beam') -> float:
+        """
+        最大配筋率检查 (GB 50010-2010)
+        
+        最大配筋率:
+        - 梁: 2.5%
+        - 柱: 5%
+        
+        Args:
+            section_idx: 截面索引
+            As: 配筋面积 (mm²)
+            element_type: 构件类型
+            
+        Returns:
+            惩罚值: 0表示满足，>0表示超限
+        """
+        sec = self.db.get_by_index(section_idx)
+        
+        if element_type == 'beam':
+            h0 = sec['h'] - 40
+            A_eff = sec['b'] * h0
+            rho = As / A_eff * 100
+            rho_max = 2.5
+        else:
+            Ag = sec['b'] * sec['h']
+            rho = As / Ag * 100
+            rho_max = 5.0
+        
+        if rho > rho_max:
+            return (rho - rho_max) / rho_max * 0.5
+        return 0.0
+    
+    def verify_comprehensive(self,
+                             forces: Dict[int, ElementForces],
+                             beam_sections: Dict[int, int],
+                             col_sections: Dict[int, int],
+                             grid = None) -> Dict[str, float]:
+        """
+        综合验算所有项目
+        
+        Returns:
+            各类惩罚值汇总 {'capacity': ..., 'axial_ratio': ..., ...}
+        """
+        penalties = {
+            'capacity': 0.0,
+            'axial_ratio': 0.0,
+            'reinforcement': 0.0,
+            'topology': 0.0,
+        }
+        
+        # 1. 承载力验算
+        cap_penalty, _ = self.verify_all_elements(forces, beam_sections, col_sections)
+        penalties['capacity'] = cap_penalty
+        
+        # 2. 柱轴压比验算
+        for elem_id, f in forces.items():
+            if f.element_type == 'column':
+                sec_idx = col_sections.get(elem_id, 40)
+                penalties['axial_ratio'] += self.check_axial_ratio(sec_idx, f.N_design)
+        
+        # 3. 配筋率验算
+        for elem_id, f in forces.items():
+            if f.element_type == 'beam':
+                sec_idx = beam_sections.get(elem_id, 30)
+                penalties['reinforcement'] += self.check_min_reinforcement(
+                    sec_idx, DEFAULT_BEAM_AS, 'beam'
+                )
+            else:
+                sec_idx = col_sections.get(elem_id, 40)
+                penalties['reinforcement'] += self.check_min_reinforcement(
+                    sec_idx, DEFAULT_COL_AS, 'column'
+                )
+        
+        # 4. 拓扑约束 (如果提供了grid)
+        if grid:
+            genes = [30, 30, 40, 40]  # 默认基因
+            penalties['topology'] = self.check_topology_constraints(genes, grid)
+        
+        return penalties
 
 # =============================================================================
 # 测试代码

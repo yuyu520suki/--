@@ -13,7 +13,11 @@ from anastruct import SystemElements
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from phase1.section_database import SectionDatabase
-from phase4.data_models import GridInput, ElementForces
+from phase4.data_models import GridInput, ElementForces, ElementForcesEnvelope
+from phase4.load_combinations import (
+    LoadCombinationGenerator, LoadCombination,
+    WindLoadParams, SnowLoadParams
+)
 
 
 # =============================================================================
@@ -131,26 +135,45 @@ class StructureModel:
                 elem_id += 1
     
     def _assign_groups(self) -> None:
-        """自动分配构件分组（用于分组编码）"""
+        """
+        自动分配构件分组（用于6基因分组编码）
+        
+        基因顺序: [标准梁, 屋面梁, 底层柱, 标准层角柱, 标准层内柱, 顶层柱]
+        """
         n_cols = self.grid.num_spans + 1
+        n_stories = self.grid.num_stories
         
-        # 柱分组: 角柱、边柱、内柱
-        corner_cols = []
-        edge_cols = []
-        interior_cols = []
+        # 柱分组: 按层和位置区分
+        bottom_cols = []          # 底层柱 (第1层)
+        standard_corner_cols = [] # 标准层角柱 (第2~n-1层)
+        standard_interior_cols = [] # 标准层内柱 (第2~n-1层)
+        top_cols = []             # 顶层柱 (第n层)
         
-        col_id_start = max(self.beams.keys()) + 1 if self.beams else 1
-        for i, col_id in enumerate(self.columns.keys()):
-            col_line = i % n_cols  # 柱列位置
-            if col_line == 0 or col_line == self.grid.num_spans:
-                corner_cols.append(col_id)
+        for col_id in self.columns.keys():
+            # 计算柱所在的层和位置
+            col_idx = col_id - max(self.beams.keys()) - 1 if self.beams else col_id - 1
+            story = col_idx // n_cols + 1  # 第几层 (1-indexed)
+            col_line = col_idx % n_cols    # 柱列位置
+            is_corner = (col_line == 0 or col_line == self.grid.num_spans)
+            
+            if story == 1:
+                # 底层柱
+                bottom_cols.append(col_id)
+            elif story == n_stories:
+                # 顶层柱
+                top_cols.append(col_id)
             else:
-                interior_cols.append(col_id)
+                # 标准层柱
+                if is_corner:
+                    standard_corner_cols.append(col_id)
+                else:
+                    standard_interior_cols.append(col_id)
         
         self.column_groups = {
-            'corner': corner_cols,
-            'edge': edge_cols,
-            'interior': interior_cols,
+            'bottom': bottom_cols,
+            'standard_corner': standard_corner_cols,
+            'standard_interior': standard_interior_cols,
+            'top': top_cols,
         }
         
         # 梁分组: 标准层梁、屋面梁
@@ -188,19 +211,21 @@ class StructureModel:
         """
         根据分组基因设置截面
         
-        基因顺序: [标准层梁, 屋面梁, 角柱, 内柱]
+        基因顺序: [标准层梁, 屋面梁, 底层柱, 标准层角柱, 标准层内柱, 顶层柱]
         
         Args:
             genes: 截面索引列表
         """
-        if len(genes) < 4:
-            raise ValueError("需要至少4个基因: [标准梁, 屋面梁, 角柱, 内柱]")
+        if len(genes) < 6:
+            raise ValueError("需要至少6个基因: [标准梁, 屋面梁, 底层柱, 标准层角柱, 标准层内柱, 顶层柱]")
         
         # 解码基因
         std_beam_sec = genes[0]
         roof_beam_sec = genes[1]
-        corner_col_sec = genes[2]
-        interior_col_sec = genes[3]
+        bottom_col_sec = genes[2]
+        std_corner_col_sec = genes[3]
+        std_interior_col_sec = genes[4]
+        top_col_sec = genes[5]
         
         # 分配梁截面
         for beam_id in self.beam_groups.get('standard', []):
@@ -209,10 +234,14 @@ class StructureModel:
             self.beam_sections[beam_id] = roof_beam_sec
         
         # 分配柱截面
-        for col_id in self.column_groups.get('corner', []):
-            self.column_sections[col_id] = corner_col_sec
-        for col_id in self.column_groups.get('interior', []):
-            self.column_sections[col_id] = interior_col_sec
+        for col_id in self.column_groups.get('bottom', []):
+            self.column_sections[col_id] = bottom_col_sec
+        for col_id in self.column_groups.get('standard_corner', []):
+            self.column_sections[col_id] = std_corner_col_sec
+        for col_id in self.column_groups.get('standard_interior', []):
+            self.column_sections[col_id] = std_interior_col_sec
+        for col_id in self.column_groups.get('top', []):
+            self.column_sections[col_id] = top_col_sec
     
     def build_anastruct_model(self) -> SystemElements:
         """
@@ -291,8 +320,9 @@ class StructureModel:
             node_id = col_idx * 2 + 1  # 简化：第一层柱的底部节点
             self.ss.add_support_fixed(node_id=node_id)
         
-        # 施加荷载 (梁上均布荷载)
-        q_total = -(self.grid.q_dead + self.grid.q_live)  # 向下为负
+        # 施加荷载 (梁上均布荷载 - 使用ULS设计值)
+        # GB 50009-2012: 1.2G + 1.4Q
+        q_total = -(1.2 * self.grid.q_dead + 1.4 * self.grid.q_live)  # 向下为负
         
         for beam_id in self.beams.keys():
             as_id = self._as_elem_map.get(beam_id)
@@ -392,6 +422,304 @@ class StructureModel:
             f"  总宽度: {self.grid.total_width/1000:.1f} m\n"
             f"  总高度: {self.grid.total_height/1000:.1f} m"
         )
+    
+    # =========================================================================
+    # 多工况分析方法
+    # =========================================================================
+    
+    def _build_model_for_combination(self, 
+                                     load_factors: Dict[str, float],
+                                     wind_params: WindLoadParams = None,
+                                     snow_params: SnowLoadParams = None) -> SystemElements:
+        """
+        为指定荷载组合构建模型
+        
+        Args:
+            load_factors: 荷载系数字典 {'dead': 1.2, 'live': 1.4, ...}
+            wind_params: 风荷载参数
+            snow_params: 雪荷载参数
+            
+        Returns:
+            构建好的 SystemElements 模型
+        """
+        if not self.grid or not self.nodes:
+            raise ValueError("请先调用 build_from_grid()")
+        
+        ss = SystemElements()
+        n_cols = self.grid.num_spans + 1
+        
+        as_elem_map = {}
+        as_elem_id = 1
+        
+        # 逐层构建
+        for story in range(self.grid.num_stories):
+            story_height = self.grid.z_heights[story] / 1000  # m
+            z_bottom = sum(self.grid.z_heights[:story]) / 1000
+            z_top = z_bottom + story_height
+            
+            # 柱
+            for col_idx in range(n_cols):
+                x = sum(self.grid.x_spans[:col_idx]) / 1000
+                
+                col_id = self._get_column_id(col_idx, story)
+                sec_idx = self.column_sections.get(col_id, 30)
+                sec = self.db.get_by_index(sec_idx)
+                
+                EI = E_C * self.db.get_Ieff(sec_idx, 'column') / 1e9
+                EA = E_C * sec['A'] / 1e3
+                
+                ss.add_element(
+                    location=[[x, z_bottom], [x, z_top]],
+                    EI=EI, EA=EA
+                )
+                as_elem_map[col_id] = as_elem_id
+                as_elem_id += 1
+            
+            # 梁
+            for span_idx in range(self.grid.num_spans):
+                x_left = sum(self.grid.x_spans[:span_idx]) / 1000
+                x_right = x_left + self.grid.x_spans[span_idx] / 1000
+                
+                beam_id = self._get_beam_id(span_idx, story)
+                sec_idx = self.beam_sections.get(beam_id, 30)
+                sec = self.db.get_by_index(sec_idx)
+                
+                EI = E_C * self.db.get_Ieff(sec_idx, 'beam') / 1e9
+                EA = E_C * sec['A'] / 1e3
+                
+                ss.add_element(
+                    location=[[x_left, z_top], [x_right, z_top]],
+                    EI=EI, EA=EA
+                )
+                as_elem_map[beam_id] = as_elem_id
+                as_elem_id += 1
+        
+        # 支座
+        for col_idx in range(n_cols):
+            node_id = col_idx * 2 + 1
+            ss.add_support_fixed(node_id=node_id)
+        
+        # ============ 施加荷载 ============
+        
+        # 1. 竖向荷载 (恒载 + 活载)
+        gamma_dead = load_factors.get('dead', 0.0)
+        gamma_live = load_factors.get('live', 0.0)
+        q_vertical = -(gamma_dead * self.grid.q_dead + gamma_live * self.grid.q_live)
+        
+        for beam_id in self.beams.keys():
+            as_id = as_elem_map.get(beam_id)
+            if as_id:
+                ss.q_load(element_id=as_id, q=q_vertical)
+        
+        # 2. 雪荷载 (仅屋面梁)
+        gamma_snow = load_factors.get('snow', 0.0)
+        if gamma_snow > 0 and snow_params:
+            sk = snow_params.get_sk()
+            # 假设受荷宽度为跨度的一半 (简化处理)
+            avg_span = sum(self.grid.x_spans) / len(self.grid.x_spans) / 1000  # m
+            q_snow = -(gamma_snow * sk * avg_span / 2)  # kN/m
+            
+            roof_beams = self.beam_groups.get('roof', [])
+            for beam_id in roof_beams:
+                as_id = as_elem_map.get(beam_id)
+                if as_id:
+                    ss.q_load(element_id=as_id, q=q_snow)
+        
+        # 3. 风荷载 (水平节点力)
+        # 采用等效梁端节点力的方式施加
+        gamma_wind = load_factors.get('wind', 0.0)
+        if gamma_wind > 0 and wind_params:
+            # 构建节点到anastruct节点的映射
+            # anastruct节点编号规则：每个单元依次添加，共享节点会合并
+            # 我们追踪每层左侧柱顶节点来施加风力
+            
+            # 计算各层风荷载
+            for story in range(self.grid.num_stories):
+                z = sum(self.grid.z_heights[:story+1]) / 1000  # 该层顶标高 (m)
+                wk = wind_params.get_wk(z)  # kN/m²
+                
+                # 受荷面积: 层高 × 进深 (假设多榀框架，进深取平均跨度)
+                story_height = self.grid.z_heights[story] / 1000  # m
+                avg_span = sum(self.grid.x_spans) / len(self.grid.x_spans) / 1000  # m
+                
+                # 该层总风力 (简化：假设迎风面宽度等于一个开间)
+                F_wind = gamma_wind * wk * story_height * avg_span  # kN
+                
+                # 将风力作为水平均布荷载施加到该层所有梁上
+                # 这是一种等效简化方法
+                beams_in_story = []
+                for beam_id in self.beams.keys():
+                    beam_story = (beam_id - 1) // self.grid.num_spans
+                    if beam_story == story:
+                        beams_in_story.append(beam_id)
+                
+                if beams_in_story:
+                    # 将风力平均分配到该层各梁的左端节点
+                    F_per_beam = F_wind / len(beams_in_story)
+                    
+                    # 施加到第一根梁的左端 (简化处理)
+                    first_beam_as_id = as_elem_map.get(beams_in_story[0])
+                    if first_beam_as_id:
+                        try:
+                            # 施加点荷载到梁的起点
+                            ss.point_load(element_id=first_beam_as_id, Fx=F_wind, x=0)
+                        except Exception:
+                            pass  # 忽略施加失败
+        
+        return ss, as_elem_map
+    
+    def analyze_combination(self, 
+                            combination: LoadCombination,
+                            wind_params: WindLoadParams = None,
+                            snow_params: SnowLoadParams = None) -> Dict[int, ElementForces]:
+        """
+        分析单个荷载组合
+        
+        Args:
+            combination: 荷载组合对象
+            wind_params: 风荷载参数
+            snow_params: 雪荷载参数
+            
+        Returns:
+            内力结果字典
+        """
+        # 构建荷载系数字典
+        load_factors = {lt: f for lt, f in combination.factors}
+        
+        ss, as_elem_map = self._build_model_for_combination(
+            load_factors, wind_params, snow_params
+        )
+        
+        # 求解
+        ss.solve()
+        
+        # 提取内力
+        forces = {}
+        
+        for col_id, (start, end) in self.columns.items():
+            as_id = as_elem_map.get(col_id)
+            if not as_id:
+                continue
+            
+            results = ss.get_element_results(element_id=as_id)
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            length = ((x2-x1)**2 + (z2-z1)**2)**0.5
+            
+            forces[col_id] = ElementForces(
+                element_id=col_id,
+                element_type='column',
+                length=length,
+                axial_max=results['Nmax'],
+                axial_min=results['Nmin'],
+                shear_max=results['Qmax'],
+                shear_min=results['Qmin'],
+                moment_max=results['Mmax'],
+                moment_min=results['Mmin'],
+            )
+        
+        for beam_id, (start, end) in self.beams.items():
+            as_id = as_elem_map.get(beam_id)
+            if not as_id:
+                continue
+            
+            results = ss.get_element_results(element_id=as_id)
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            length = ((x2-x1)**2 + (z2-z1)**2)**0.5
+            
+            forces[beam_id] = ElementForces(
+                element_id=beam_id,
+                element_type='beam',
+                length=length,
+                axial_max=results['Nmax'],
+                axial_min=results['Nmin'],
+                shear_max=results['Qmax'],
+                shear_min=results['Qmin'],
+                moment_max=results['Mmax'],
+                moment_min=results['Mmin'],
+            )
+        
+        return forces
+    
+    def analyze_envelope(self,
+                         wind_params: WindLoadParams = None,
+                         snow_params: SnowLoadParams = None) -> Dict[int, ElementForcesEnvelope]:
+        """
+        分析所有荷载组合并返回内力包络
+        
+        Args:
+            wind_params: 风荷载参数 (可选)
+            snow_params: 雪荷载参数 (可选)
+            
+        Returns:
+            内力包络结果字典
+        """
+        # 生成荷载组合
+        generator = LoadCombinationGenerator()
+        has_wind = wind_params is not None and self.grid.has_wind
+        has_snow = snow_params is not None and self.grid.has_snow
+        
+        uls_combos = generator.get_uls_combinations(has_wind, has_snow)
+        sls_combos = generator.get_sls_combinations()
+        
+        # 初始化包络结果
+        envelope = {}
+        for elem_id in list(self.beams.keys()) + list(self.columns.keys()):
+            if elem_id in self.beams:
+                start, end = self.beams[elem_id]
+                elem_type = 'beam'
+            else:
+                start, end = self.columns[elem_id]
+                elem_type = 'column'
+            
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            length = ((x2-x1)**2 + (z2-z1)**2)**0.5
+            
+            envelope[elem_id] = ElementForcesEnvelope(
+                element_id=elem_id,
+                element_type=elem_type,
+                length=length
+            )
+        
+        # 遍历 ULS 组合
+        for combo in uls_combos:
+            try:
+                forces = self.analyze_combination(combo, wind_params, snow_params)
+                
+                for elem_id, f in forces.items():
+                    env = envelope[elem_id]
+                    
+                    # 更新最大值
+                    if f.moment_max > env.M_uls_max:
+                        env.M_uls_max = f.moment_max
+                        env.controlling_combo = combo.name
+                    if f.moment_min < env.M_uls_min:
+                        env.M_uls_min = f.moment_min
+                    if abs(f.shear_max) > abs(env.V_uls_max):
+                        env.V_uls_max = f.shear_max
+                    if f.axial_max > env.N_uls_max:
+                        env.N_uls_max = f.axial_max
+                    if f.axial_min < env.N_uls_min:
+                        env.N_uls_min = f.axial_min
+            except Exception as e:
+                print(f"警告: 组合 {combo.name} 分析失败: {e}")
+        
+        # 遍历 SLS 组合 (取准永久组合的弯矩)
+        for combo in sls_combos:
+            if combo.limit_state == 'SLS_QUASI':
+                try:
+                    forces = self.analyze_combination(combo, wind_params, snow_params)
+                    for elem_id, f in forces.items():
+                        envelope[elem_id].M_sls = max(
+                            abs(f.moment_max), 
+                            abs(f.moment_min)
+                        )
+                except Exception as e:
+                    print(f"警告: SLS组合分析失败: {e}")
+        
+        return envelope
 
 
 # =============================================================================

@@ -132,21 +132,21 @@ class FrameOptimizer:
             self.model.build_anastruct_model()
             forces = self.model.analyze()
             
-            # 3. 验算所有构件
+            # 3. 验算所有构件 (承载力验算)
             total_penalty, _ = self.verifier.verify_all_elements(
                 forces,
                 self.model.beam_sections,
                 self.model.column_sections
             )
             
-            # 4. 检查拓扑约束
+            # 4. 检查拓扑约束 (强柱弱梁)
             topo_penalty = self.verifier.check_topology_constraints(genes, self.grid)
             total_penalty += topo_penalty
             
             # 5. 计算造价
             cost = self.calculate_cost(genes)
             
-            # 6. 计算适应度
+            # 7. 计算适应度
             # F = cost × (1 + penalty)^α
             F = cost * (1 + self.penalty_coeff * total_penalty) ** self.alpha
             fitness = 1.0 / (F + 1e-9)
@@ -164,10 +164,7 @@ class FrameOptimizer:
     
     def on_generation(self, ga_instance) -> None:
         """
-        每代回调：自适应调整
-        
-        1. 根据可行解比例调整惩罚系数
-        2. 根据适应度方差调整变异率
+        每代回调：记录历史并自适应调整
         """
         gen = ga_instance.generations_completed
         fitness_values = ga_instance.last_generation_fitness
@@ -175,11 +172,17 @@ class FrameOptimizer:
         # 计算统计量
         variance = np.var(fitness_values)
         best_fitness = np.max(fitness_values)
-        best_cost = 1.0 / best_fitness if best_fitness > 0 else float('inf')
         
         # 可行解比例
         feasible_ratio = (self._current_gen_feasible / self._current_gen_total 
                           if self._current_gen_total > 0 else 0)
+        
+        # 正确计算当代最优造价
+        # 需要从最优个体重新计算造价（而不是从fitness反推）
+        best_idx = np.argmax(fitness_values)
+        best_solution = ga_instance.population[best_idx]
+        best_genes = [int(g) for g in best_solution]
+        best_cost = self.calculate_cost(best_genes)
         
         # 记录历史
         self.fitness_history.append(best_fitness)
@@ -187,22 +190,15 @@ class FrameOptimizer:
         self.variance_history.append(variance)
         self.feasible_ratio_history.append(feasible_ratio)
         
-        # 自适应惩罚系数
-        if feasible_ratio > 0.6:
-            self.penalty_coeff *= 0.95  # 放松惩罚，允许边界探索
-        elif feasible_ratio < 0.3:
-            self.penalty_coeff *= 1.05  # 加强惩罚，推向安全区域
-        
-        # 限制惩罚系数范围
-        self.penalty_coeff = np.clip(self.penalty_coeff, 0.5, 5.0)
-        
-        # 自适应变异率
-        if variance < 1e-8:
-            ga_instance.mutation_probability = 0.25
-        elif variance < 1e-6:
-            ga_instance.mutation_probability = 0.15
-        else:
-            ga_instance.mutation_probability = 0.08
+        # 自适应惩罚系数（每5代调整一次，避免震荡）
+        if gen % 5 == 0:
+            if feasible_ratio > 0.7:
+                self.penalty_coeff *= 0.9  # 放松惩罚
+            elif feasible_ratio < 0.2:
+                self.penalty_coeff *= 1.1  # 加强惩罚
+            
+            # 限制惩罚系数范围
+            self.penalty_coeff = np.clip(self.penalty_coeff, 0.5, 3.0)
         
         # 重置计数器
         self._current_gen_feasible = 0
@@ -247,28 +243,29 @@ class FrameOptimizer:
         self.feasible_ratio_history.clear()
         self.penalty_coeff = 1.0
         
-        # GA配置
+        # GA配置 - 优化参数以避免早熟收敛
+        # 注意：分组编码只有6个基因，搜索空间有限，需要高变异率维持多样性
         ga_instance = pygad.GA(
             num_generations=num_generations,
-            num_parents_mating=10,
+            num_parents_mating=max(20, sol_per_pop // 2),  # 增加父代数量到50%
             fitness_func=self.fitness_func,
             sol_per_pop=sol_per_pop,
-            num_genes=4,  # [标准梁, 屋面梁, 角柱, 内柱]
+            num_genes=6,  # [标准梁, 屋面梁, 底层柱, 标准角柱, 标准内柱, 顶层柱]
             gene_type=int,
             gene_space={'low': 0, 'high': len(self.db) - 1},
             
-            # 选择
-            parent_selection_type="tournament",
-            K_tournament=5,
-            keep_elitism=3,
+            # 选择 - 使用轮盘赌选择增加随机性
+            parent_selection_type="rws",  # Roulette Wheel Selection
+            keep_elitism=1,  # 只保留1个最优（原2）
             
             # 交叉
-            crossover_type="single_point",
-            crossover_probability=0.8,
+            crossover_type="uniform",  # 均匀交叉，每个基因独立交换
+            crossover_probability=0.9,
             
-            # 变异
+            # 变异 - 高变异率维持多样性
             mutation_type="random",
-            mutation_probability=0.1,
+            mutation_probability=0.35,  # 提高到35%
+            mutation_num_genes=3,  # 每次变异3个基因
             
             # 回调
             on_generation=self.on_generation,
@@ -297,7 +294,8 @@ class FrameOptimizer:
         print("=" * 70)
         print(f"最优基因: {best_genes}")
         
-        for i, name in enumerate(['标准梁', '屋面梁', '角柱', '内柱']):
+        names = ['标准梁', '屋面梁', '底层柱', '标准角柱', '标准内柱', '顶层柱']
+        for i, name in enumerate(names):
             sec_idx = best_genes[i]
             sec = self.db.get_by_index(sec_idx)
             print(f"  {name}: {sec['b']}×{sec['h']}")
