@@ -68,7 +68,7 @@ class StructureModel:
         
         # 分组信息
         self.beam_groups: Dict[str, List[int]] = {}   # {'standard': [ids...]}
-        self.column_groups: Dict[str, List[int]] = {} # {'corner': [ids...]}
+        self.column_groups: Dict[str, List[int]] = {} # {'bottom': [], 'standard_corner': [], 'standard_interior': [], 'top': []}
     
     def build_from_grid(self, grid: GridInput) -> None:
         """
@@ -750,18 +750,20 @@ if __name__ == "__main__":
     print(f"  屋面梁: {len(model.beam_groups.get('roof', []))} 根")
     
     print(f"\n柱分组:")
-    print(f"  角柱: {len(model.column_groups.get('corner', []))} 根")
-    print(f"  内柱: {len(model.column_groups.get('interior', []))} 根")
+    print(f"  底层柱: {len(model.column_groups.get('bottom', []))} 根")
+    print(f"  标准层角柱: {len(model.column_groups.get('standard_corner', []))} 根")
+    print(f"  标准层内柱: {len(model.column_groups.get('standard_interior', []))} 根")
+    print(f"  顶层柱: {len(model.column_groups.get('top', []))} 根")
     
-    # 设置截面 (使用分组编码)
-    genes = [35, 35, 45, 40]  # [标准梁, 屋面梁, 角柱, 内柱]
+    # 设置截面 (使用6基因分组编码)
+    genes = [35, 35, 45, 45, 45, 35]  # [标准梁, 屋面梁, 底层柱, 标准角柱, 标准内柱, 顶层柱]
     model.set_sections_by_groups(genes)
     
     print(f"\n截面分配 (基因: {genes}):")
     beam_sec = db.get_by_index(genes[0])
     col_sec = db.get_by_index(genes[2])
     print(f"  标准梁: {beam_sec['b']}×{beam_sec['h']} mm")
-    print(f"  角柱: {col_sec['b']}×{col_sec['h']} mm")
+    print(f"  底层柱: {col_sec['b']}×{col_sec['h']} mm")
     
     # 构建和分析
     print("\n正在分析...")

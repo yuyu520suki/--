@@ -221,6 +221,10 @@ class OptimizationResult:
     designs: List[DesignResult] = field(default_factory=list)
     convergence_history: List[float] = field(default_factory=list)
     fitness_history: List[float] = field(default_factory=list) # 新增：适应度历史
+    
+    # 兼容性字段 (新版本报告需要)
+    cost_history: List[float] = field(default_factory=list)        # 造价历史 (与convergence_history通常相同)
+    feasible_ratio_history: List[float] = field(default_factory=list) # 可行解比例历史
 
 
 # =============================================================================

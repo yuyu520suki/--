@@ -426,10 +426,16 @@ class ResultPanel(ttk.LabelFrame):
         self.btn_frame2 = ttk.Frame(self)
         self.btn_frame2.pack(fill='x', pady=(5, 0))
         
+        ttk.Button(self.btn_frame2, text="📋 模型验证",
+                  command=self._run_validation).pack(side='left', padx=2)
         ttk.Button(self.btn_frame2, text="📄 打开计算书",
                   command=self._open_report).pack(side='left', padx=2)
         ttk.Button(self.btn_frame2, text="📁 打开输出目录",
                   command=self._open_output_dir).pack(side='left', padx=2)
+        
+        # 保存验证所需的数据
+        self.grid_input = None
+        self.model = None
     
     def update_result(self, result: OptimizationResult, db: SectionDatabase, output_dir: Path = None):
         """更新结果显示"""
@@ -503,6 +509,47 @@ class ResultPanel(ttk.LabelFrame):
             os.startfile(str(self.output_dir))
         except Exception as e:
             messagebox.showerror("打开失败", str(e))
+    
+    def _run_validation(self):
+        """运行模型验证（完整版）"""
+        if not self.result:
+            messagebox.showwarning("警告", "请先运行优化")
+            return
+        
+        if not self.grid_input or not self.model:
+            messagebox.showwarning("警告", "验证数据不完整，请重新运行优化")
+            return
+        
+        # 获取数据库引用
+        db = None
+        parent = self.master
+        while parent:
+            if hasattr(parent, 'db'):
+                db = parent.db
+                break
+            parent = getattr(parent, 'master', None)
+        
+        try:
+            from phase5.model_validator import validate_optimization_result
+            
+            # 运行完整验证（包括蒙特卡洛测试）
+            validation_result = validate_optimization_result(
+                grid=self.grid_input,
+                model=self.model,
+                forces=self.result.forces,
+                db=db  # 传递db以启用蒙特卡洛测试
+            )
+            
+            # 显示详细报告对话框
+            if validation_result.all_passed:
+                messagebox.showinfo("验证通过", validation_result.summary)
+            else:
+                messagebox.showwarning("验证警告", validation_result.summary)
+                
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("验证失败", str(e))
 
 
 # =============================================================================
@@ -653,6 +700,10 @@ class FrameOptimizerGUI(tk.Tk):
                 generate_excel_report(result, model, self.db, str(output_dir / "优化结果.xlsx"))
                 generate_word_report(result, model, self.db, grid, 
                                    str(output_dir / "设计计算书.docx"), image_paths)
+                
+                # 保存验证所需的数据（供验证按钮使用）
+                self.result_panel.grid_input = grid
+                self.result_panel.model = model
                 
                 # 更新UI（主线程）
                 self.after(0, lambda: self._on_optimization_complete(result, output_dir))

@@ -67,7 +67,7 @@ def main():
     optimizer = FrameOptimizer(grid, db)
     
     result = optimizer.run(
-        num_generations=50,   # 50代
+        num_generations=100,  # 100代
         sol_per_pop=40,       # 种群40
         random_seed=42,
     )
@@ -115,14 +115,20 @@ def main():
     )
     
     # ==========================================================================
-    # 5. 输出最终结果摘要
+    # 5. Phase 5: 模型验证 (可选)
+    # ==========================================================================
+    print("\n提示: 如需运行模型验证，请执行: python phase5/model_validator.py")
+    
+    # ==========================================================================
+    # 6. 输出最终结果摘要
     # ==========================================================================
     print("\n" + "=" * 70)
     print("✓ 优化完成 - 最终结果")
     print("=" * 70)
     
     print(f"\n最优截面配置:")
-    for i, name in enumerate(['标准层梁', '屋面梁', '角柱', '内柱']):
+    names = ['标准层梁', '屋面梁', '底层柱', '标准角柱', '标准内柱', '顶层柱']
+    for i, name in enumerate(names):
         sec = db.get_by_index(result.genes[i])
         print(f"  {name}: {sec['b']} × {sec['h']} mm")
     
@@ -164,8 +170,8 @@ def test_single_span_equivalence():
     model = StructureModel(db)
     model.build_from_grid(grid)
     
-    # 设置与 phase2 相同的截面
-    genes = [35, 35, 45, 45]  # 中等截面
+    # 设置与 phase2 相同的截面 (6基因编码)
+    genes = [35, 35, 45, 45, 45, 35]  # [标准梁, 屋面梁, 底层柱, 标准角柱, 标准内柱, 顶层柱]
     model.set_sections_by_groups(genes)
     
     model.build_anastruct_model()

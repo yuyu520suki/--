@@ -151,59 +151,72 @@ def calculate_capacity(b: float, h: float, As: float,
 def generate_pm_curve(b: float, h: float, As_total: float, 
                       num_points: int = 50) -> List[Tuple[float, float]]:
     """
-    生成 P-M 相互作用曲线
+    生成 P-M 相互作用曲线 (GB 50010-2010 第6.2节)
+    
+    采用规范公式，对受拉钢筋合力点取矩:
+    N = α1·fc·b·x + fy'·As' - σs·As
+    M = α1·fc·b·x·(h0 - x/2) + fy'·As'·(h0 - as')
     
     Args:
-        b, h: 截面尺寸 (mm)
+        b, h: 截面尺寸 (mm), b为宽度，h为弯矩作用方向高度
         As_total: 总配筋面积 (mm²), 假设对称配筋
         num_points: 曲线点数
     
     Returns:
-        List[(P, M)]: P (kN), M (kN·m) 点列表
+        List[(P, M)]: P (kN) [压为正], M (kN·m) [取正值] 点列表
     """
     h0 = get_h0(h)
-    a_s = h - h0
+    a_s = h - h0  # 受拉钢筋合力点到受拉边缘距离
+    a_s_prime = a_s  # 受压钢筋合力点到受压边缘距离（对称配筋）
     As = As_total / 2  # 对称配筋，每侧一半
+    As_prime = As
+    
+    # 界限相对受压区高度
+    xi_b = BETA_1 / (1 + F_Y / (E_S * 0.0033))  # ≈ 0.518 for HRB400
+    x_b = xi_b * h0  # 界限受压区高度
     
     points = []
     
-    # 从纯压到纯弯遍历
+    # 从纯压 (x=h) 到接近纯弯 (x→0) 遍历
     for i in range(num_points + 1):
-        # x 从 h (纯压) 到 0 (纯弯)
+        # x 从 h (纯压) 递减到 接近0 (纯弯附近)
         x = h * (1 - i / num_points)
+        x = max(2 * a_s_prime * 0.1, min(x, h))  # 避免x过小导致除零
         
-        # 限制 x 的范围
-        x = max(0, min(x, h))
-        
-        # 受压钢筋应力
-        if x >= 2 * a_s:
+        # ===== 钢筋应力计算 =====
+        # 受压钢筋应力 σs' (GB 50010-2010 平截面假定)
+        if x >= 2 * a_s_prime:
+            # 受压钢筋屈服
             sigma_s_prime = F_Y_PRIME
         else:
-            sigma_s_prime = E_S * 0.0033 * (x - a_s) / x if x > 0 else 0
+            # 受压钢筋未屈服，按应变计算
+            eps_s_prime = 0.0033 * (x - a_s_prime) / x
+            sigma_s_prime = E_S * eps_s_prime
             sigma_s_prime = max(-F_Y, min(F_Y_PRIME, sigma_s_prime))
         
-        # 受拉钢筋应力
-        if x <= BETA_1 * h0 / (1 + F_Y / (E_S * 0.0033)):
+        # 受拉钢筋应力 σs
+        if x <= x_b:
+            # 大偏心受压：受拉钢筋屈服
             sigma_s = F_Y
         else:
-            sigma_s = E_S * 0.0033 * (h0 - x / BETA_1) / (x / BETA_1) if x > 0 else F_Y
+            # 小偏心受压：受拉钢筋可能不屈服
+            eps_s = 0.0033 * (h0 - x) / x
+            sigma_s = E_S * eps_s
             sigma_s = max(-F_Y_PRIME, min(F_Y, sigma_s))
         
+        # ===== 截面承载力计算 (GB 50010-2010 公式6.2.17/6.2.18) =====
         # 轴力 N (压为正)
-        Nc = ALPHA_1 * F_C * b * x
-        Ns = As * sigma_s_prime - As * sigma_s
-        N = Nc + Ns
+        N = ALPHA_1 * F_C * b * x + sigma_s_prime * As_prime - sigma_s * As
         
-        # 弯矩 M (对截面形心)
-        M = (ALPHA_1 * F_C * b * x * (h / 2 - x / 2) + 
-             As * sigma_s_prime * (h / 2 - a_s) + 
-             As * sigma_s * (h / 2 - a_s))
+        # 弯矩 M (对受拉钢筋合力点取矩)
+        # 注意：只有混凝土压力和受压钢筋对受拉筋合力点产生正弯矩
+        M = ALPHA_1 * F_C * b * x * (h0 - x / 2) + sigma_s_prime * As_prime * (h0 - a_s_prime)
         
         # 转换单位
-        P = N / 1000   # kN
-        M = M / 1e6    # kN·m
+        P = N / 1000   # kN (压为正)
+        M_val = abs(M) / 1e6    # kN·m (取绝对值)
         
-        points.append((P, M))
+        points.append((P, M_val))
     
     return points
 

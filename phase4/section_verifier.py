@@ -141,9 +141,9 @@ class SectionVerifier:
                               pu: float, 
                               mu: float) -> float:
         """
-        验算柱承载力 (简化D/C比方法)
+        验算柱承载力 (使用真实P-M曲线)
         
-        使用简化公式：考虑轴力对弯矩承载力的影响
+        使用预计算的P-M曲线进行精确验算，确保与图表显示一致
         
         Args:
             section_idx: 截面索引
@@ -153,29 +153,63 @@ class SectionVerifier:
         Returns:
             惩罚值: 0表示安全，>0表示超限
         """
+        # 获取P-M曲线（使用缓存）
+        pm_curve = self.get_pm_curve(section_idx)
+        
+        if not pm_curve:
+            # 无曲线时回退到简化方法
+            return self._check_column_simplified(section_idx, pu, mu)
+        
+        # 使用真实P-M曲线验算
+        # 注意：check_pm_capacity中，P是压力为正，与我们的约定一致
+        is_safe = check_pm_capacity(abs(pu), abs(mu), pm_curve)
+        
+        if is_safe:
+            return 0.0
+        else:
+            # 计算超限程度作为惩罚值
+            # 找到对应轴力下的弯矩承载力
+            M_capacity = self._get_pm_capacity_at_axial(pm_curve, abs(pu))
+            if M_capacity > 0:
+                over_ratio = abs(mu) / M_capacity - 1.0
+                return max(0.0, over_ratio) * 2.0  # 放大惩罚
+            else:
+                return 1.0  # 默认惩罚
+    
+    def _check_column_simplified(self, section_idx: int, pu: float, mu: float) -> float:
+        """简化的柱验算方法（备用）"""
         sec = self.db.get_by_index(section_idx)
         cap = calculate_capacity(sec['b'], sec['h'], DEFAULT_COL_AS)
         
-        # 简化的P-M相互作用验算
-        # 纯弯承载力
         phi_Mn = cap['phi_Mn']
-        
-        # 估算轴压承载力 (0.85*fc*Ag)
         fc = 14.3  # MPa (C30)
-        Ag = sec['b'] * sec['h']  # mm²
-        phi_Pn = 0.65 * 0.85 * fc * Ag / 1000  # kN
+        Ag = sec['b'] * sec['h']
+        phi_Pn = 0.65 * 0.85 * fc * Ag / 1000
         
-        # 利用率计算 (简化的相互作用公式)
-        # (Pu/φPn) + (Mu/φMn) <= 1.0
         if phi_Pn > 0 and phi_Mn > 0:
             utilization = abs(pu) / phi_Pn + abs(mu) / phi_Mn
-            
             if utilization <= 1.0:
-                return 0.0  # 安全
+                return 0.0
             else:
-                return utilization - 1.0  # 超限惩罚
+                return utilization - 1.0
         
-        return 0.5  # 默认惩罚
+        return 0.5
+    
+    def _get_pm_capacity_at_axial(self, pm_curve: List[Tuple[float, float]], P_u: float) -> float:
+        """获取给定轴力下的弯矩承载力"""
+        for i in range(len(pm_curve) - 1):
+            P1, M1 = pm_curve[i]
+            P2, M2 = pm_curve[i + 1]
+            
+            if min(P1, P2) <= P_u <= max(P1, P2):
+                if abs(P2 - P1) < 1e-6:
+                    return max(abs(M1), abs(M2))
+                else:
+                    t = (P_u - P1) / (P2 - P1)
+                    return abs(M1 + t * (M2 - M1))
+        
+        # 超出范围，返回边界值
+        return max(abs(m) for p, m in pm_curve)
     
     def check_topology_constraints(self, 
                                    genes: List[int], 
@@ -185,29 +219,34 @@ class SectionVerifier:
         
         规则:
         1. 强柱弱梁：柱截面面积 >= 梁截面面积 × 0.8
-        2. 下大上小：下层柱截面 >= 上层柱截面（暂未实现）
+        2. 下大上小：底层柱 >= 标准层柱 >= 顶层柱
         
         Args:
-            genes: [标准梁, 屋面梁, 角柱, 内柱] 截面索引
+            genes: [标准梁, 屋面梁, 底层柱, 标准角柱, 标准内柱, 顶层柱] 截面索引
             grid: 轴网信息
             
         Returns:
             惩罚值: 违反程度
         """
-        if len(genes) < 4:
+        if len(genes) < 6:
             return 0.0
         
         violation = 0.0
         
-        # 强柱弱梁约束
+        # 1. 强柱弱梁约束：底层柱面积 >= 标准梁面积 × 0.8
         beam_sec = self.db.get_by_index(genes[0])  # 标准梁
-        col_sec = self.db.get_by_index(genes[2])   # 角柱
+        bottom_col_sec = self.db.get_by_index(genes[2])   # 底层柱
         
-        ratio = col_sec['A'] / beam_sec['A']
+        ratio = bottom_col_sec['A'] / beam_sec['A']
         min_ratio = 0.8
         
         if ratio < min_ratio:
             violation += (min_ratio - ratio) * 2.0  # 放大惩罚
+        
+        # 2. 下大上小约束：底层柱 >= 顶层柱
+        top_col_sec = self.db.get_by_index(genes[5])  # 顶层柱
+        if top_col_sec['A'] > bottom_col_sec['A']:
+            violation += (top_col_sec['A'] / bottom_col_sec['A'] - 1.0) * 1.5
         
         return violation
     
@@ -236,7 +275,10 @@ class SectionVerifier:
                 penalties[elem_id] = p_M + p_V
             else:
                 sec_idx = col_sections.get(elem_id, 40)
-                p = self.check_column_capacity(sec_idx, f.N_design, f.M_design)
+                # 使用压力的绝对值 (anaStruct返回压力为负，axial_min是最大压力)
+                # 这样与P-M曲线图绘制时使用的轴力保持一致
+                N_compression = abs(f.axial_min)  # 压力为正
+                p = self.check_column_capacity(sec_idx, N_compression, f.M_design)
                 penalties[elem_id] = p
             
             total_penalty += penalties[elem_id]
