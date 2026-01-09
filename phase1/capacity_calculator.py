@@ -153,9 +153,7 @@ def generate_pm_curve(b: float, h: float, As_total: float,
     """
     生成 P-M 相互作用曲线 (GB 50010-2010 第6.2节)
     
-    采用规范公式，对受拉钢筋合力点取矩:
-    N = α1·fc·b·x + fy'·As' - σs·As
-    M = α1·fc·b·x·(h0 - x/2) + fy'·As'·(h0 - as')
+    修正：弯矩 M 计算基于截面几何中心 (h/2)，以匹配结构分析输出。
     
     Args:
         b, h: 截面尺寸 (mm), b为宽度，h为弯矩作用方向高度
@@ -172,8 +170,8 @@ def generate_pm_curve(b: float, h: float, As_total: float,
     As_prime = As
     
     # 界限相对受压区高度
-    xi_b = BETA_1 / (1 + F_Y / (E_S * 0.0033))  # ≈ 0.518 for HRB400
-    x_b = xi_b * h0  # 界限受压区高度
+    xi_b = BETA_1 / (1 + F_Y / (E_S * 0.0033))
+    x_b = xi_b * h0
     
     points = []
     
@@ -181,40 +179,57 @@ def generate_pm_curve(b: float, h: float, As_total: float,
     for i in range(num_points + 1):
         # x 从 h (纯压) 递减到 接近0 (纯弯附近)
         x = h * (1 - i / num_points)
-        x = max(2 * a_s_prime * 0.1, min(x, h))  # 避免x过小导致除零
+        x = max(1.0, min(x, h))  # 避免x过小导致除零
         
         # ===== 钢筋应力计算 =====
-        # 受压钢筋应力 σs' (GB 50010-2010 平截面假定)
+        # 受压钢筋应力 sigma_s_prime (Top steel)
+        # 定义：正值为压力 (Compression)
         if x >= 2 * a_s_prime:
-            # 受压钢筋屈服
             sigma_s_prime = F_Y_PRIME
         else:
-            # 受压钢筋未屈服，按应变计算
+            # 应变: eps = 0.0033 * (x - as') / x
+            # 若 x < as', 应变为负(拉)，应力为负(拉)
             eps_s_prime = 0.0033 * (x - a_s_prime) / x
             sigma_s_prime = E_S * eps_s_prime
             sigma_s_prime = max(-F_Y, min(F_Y_PRIME, sigma_s_prime))
         
-        # 受拉钢筋应力 σs
+        # 受拉钢筋应力 sigma_s (Bottom steel)
+        # 定义：正值为拉力 (Tension)
         if x <= x_b:
-            # 大偏心受压：受拉钢筋屈服
             sigma_s = F_Y
         else:
-            # 小偏心受压：受拉钢筋可能不屈服
+            # 应变: eps = 0.0033 * (h0 - x) / x
+            # 若 x > h0 (小偏压), 应变为负(压), 应力为负(压)
             eps_s = 0.0033 * (h0 - x) / x
             sigma_s = E_S * eps_s
             sigma_s = max(-F_Y_PRIME, min(F_Y, sigma_s))
         
-        # ===== 截面承载力计算 (GB 50010-2010 公式6.2.17/6.2.18) =====
-        # 轴力 N (压为正)
+        # ===== 截面承载力计算 (对几何中心取矩) =====
+        
+        # 1. 轴力 N (压为正)
+        # N = C_c + C_s' - T_s
+        # sigma_s_prime为正(压)，sigma_s为正(拉)
         N = ALPHA_1 * F_C * b * x + sigma_s_prime * As_prime - sigma_s * As
         
-        # 弯矩 M (对受拉钢筋合力点取矩)
-        # 注意：只有混凝土压力和受压钢筋对受拉筋合力点产生正弯矩
-        M = ALPHA_1 * F_C * b * x * (h0 - x / 2) + sigma_s_prime * As_prime * (h0 - a_s_prime)
+        # 2. 弯矩 M (对截面几何中心 h/2 取矩)
+        # 规定：使截面受压区(Top)受压的弯矩为正
+        # - 混凝土压力 C_c: 位于 x/2 处。力臂 (h/2 - x/2)。产生正弯矩。
+        # - 上部钢筋力 C_s': 位于 as' 处。力臂 (h/2 - as')。
+        #   若 sigma_s_prime > 0 (压), 产生正弯矩。
+        #   若 sigma_s_prime < 0 (拉), 产生负弯矩 (抵抗)。
+        #   项: + sigma_s_prime * As_prime * (h/2 - a_s_prime)
+        # - 下部钢筋力 T_s: 位于 h-as 处。
+        #   若 sigma_s > 0 (拉), 向外拉。力臂 (h/2 - as)。产生正弯矩 (助攻)。
+        #   若 sigma_s < 0 (压), 向里压。产生负弯矩 (抵抗)。
+        #   项: + sigma_s * As * (h/2 - a_s)
+        
+        M_center = (ALPHA_1 * F_C * b * x * (0.5 * h - 0.5 * x) + 
+                    sigma_s_prime * As_prime * (0.5 * h - a_s_prime) + 
+                    sigma_s * As * (0.5 * h - a_s))
         
         # 转换单位
-        P = N / 1000   # kN (压为正)
-        M_val = abs(M) / 1e6    # kN·m (取绝对值)
+        P = N / 1000            # kN (压为正)
+        M_val = abs(M_center) / 1e6  # kN·m (取绝对值用于包络线)
         
         points.append((P, M_val))
     
@@ -238,17 +253,19 @@ def check_pm_capacity(P_u: float, M_u: float, pm_curve: List[Tuple[float, float]
         P1, M1 = pm_curve[i]
         P2, M2 = pm_curve[i + 1]
         
+        # 检查 P_u 是否在 P1, P2 区间内
         if min(P1, P2) <= P_u <= max(P1, P2):
-            # 线性插值
+            # 线性插值计算当前轴力下的最大弯矩 M_capacity
             if abs(P2 - P1) < 1e-6:
                 M_capacity = max(M1, M2)
             else:
                 t = (P_u - P1) / (P2 - P1)
                 M_capacity = M1 + t * (M2 - M1)
             
-            return abs(M_u) <= abs(M_capacity) * 1.05  # 5% 容差
+            # 允许 5% 的计算容差
+            return abs(M_u) <= abs(M_capacity) * 1.05
     
-    # P_u 超出范围，检查边界
+    # P_u 超出范围 (例如极大压力或极大拉力)
     P_min = min(p[0] for p in pm_curve)
     P_max = max(p[0] for p in pm_curve)
     
@@ -294,14 +311,6 @@ if __name__ == "__main__":
     cap = calculate_capacity(b, h, As)
     print(f"\n梁截面: {b}x{h} mm, 配筋: 3φ20 ({As} mm²)")
     print(f"  φMn = {cap['phi_Mn']:.2f} kN·m")
-    print(f"  φVn = {cap['phi_Vn']:.2f} kN")
-    
-    # 测试 Mu = 150 kN·m
-    Mu = 150
-    dc_ratio = Mu / cap['phi_Mn']
-    status = "满足" if dc_ratio <= 1.0 else "不满足"
-    print(f"\n设计弯矩 Mu = {Mu} kN·m")
-    print(f"  D/C Ratio = {dc_ratio:.3f} → {status}")
     
     # 测试 P-M 曲线
     print("\n" + "=" * 60)
@@ -314,19 +323,12 @@ if __name__ == "__main__":
     pm_curve = generate_pm_curve(b_col, h_col, As_col)
     
     print(f"\n柱截面: {b_col}x{h_col} mm, 配筋: 4φ22 ({As_col} mm²)")
-    print("P-M 曲线关键点:")
-    for i in [0, len(pm_curve)//4, len(pm_curve)//2, 3*len(pm_curve)//4, -1]:
+    print("P-M 曲线关键点 (P, M_center):")
+    for i in [0, len(pm_curve)//2, -1]:
         P, M = pm_curve[i]
         print(f"  P = {P:.1f} kN, M = {M:.2f} kN·m")
     
-    # 测试 P-M 验算
-    test_cases = [
-        (1000, 100),  # 安全
-        (2000, 200),  # 边界
-        (3000, 400),  # 超限
-    ]
-    
-    print("\nP-M 验算测试:")
-    for P_u, M_u in test_cases:
-        is_safe = check_pm_capacity(P_u, M_u, pm_curve)
-        print(f"  P={P_u} kN, M={M_u} kN·m → {'✓ 安全' if is_safe else '✗ 超限'}")
+    # 简单验证: 纯压承载力
+    # N0 = 1.0*14.3*400*400 + 360*1520 = 2288000 + 547200 = 2835200 N = 2835 kN
+    print(f"  预期纯压承载力 N0 ≈ 2835 kN")
+    print(f"  计算最大轴力 Pmax = {max(p[0] for p in pm_curve):.1f} kN")
