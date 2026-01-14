@@ -19,7 +19,11 @@ import threading
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # 从重构后的 src 包导入
-from src.models.data_models import GridInput, OptimizationResult
+from src.models.data_models import (
+    GridInput, OptimizationResult, 
+    BUILDING_TYPES, REGION_PARAMS,
+    get_building_params, get_region_params
+)
 from src.models.structure_model import StructureModel
 from src.optimization.optimizer import FrameOptimizer
 from src.calculation.section_database import SectionDatabase
@@ -43,11 +47,17 @@ class ParameterPanel(ttk.LabelFrame):
             'span_width': tk.DoubleVar(value=6000),
             'first_story_height': tk.DoubleVar(value=4000),
             'story_height': tk.DoubleVar(value=3500),
-            'q_dead': tk.DoubleVar(value=25.0),
+            'q_dead': tk.DoubleVar(value=4.5),
             'q_live': tk.DoubleVar(value=2.5),   # GB 55001-2021 住宅楼面活荷载
-            'w0': tk.DoubleVar(value=0.0),       # 默认不考虑风荷载
-            's0': tk.DoubleVar(value=0.0),       # 默认不考虑雪荷载
+            'w0': tk.DoubleVar(value=0.35),       # 六安基本风压
+            's0': tk.DoubleVar(value=0.55),       # 六安基本雪压
+            'alpha_max': tk.DoubleVar(value=0.08),  # 六安地震影响系数最大值
+            'gamma_0': tk.DoubleVar(value=1.0),    # 结构重要性系数
         }
+        
+        # 下拉框变量
+        self.building_type_var = tk.StringVar(value="办公")
+        self.region_var = tk.StringVar(value="六安")
         
         self._create_widgets()
     
@@ -55,7 +65,33 @@ class ParameterPanel(ttk.LabelFrame):
         """创建输入控件"""
         row = 0
         
-        # 轴网配置
+        # ========== 建筑与地区配置 ==========
+        ttk.Label(self, text="── 建筑与地区 ──", font=('SimHei', 10, 'bold')).grid(
+            row=row, column=0, columnspan=3, sticky='w', pady=(0, 5))
+        row += 1
+        
+        # 建筑类型下拉框
+        ttk.Label(self, text="建筑类型:").grid(row=row, column=0, sticky='e', padx=(0, 5))
+        building_types = list(BUILDING_TYPES.keys())
+        self.building_combo = ttk.Combobox(self, textvariable=self.building_type_var,
+                                           values=building_types, width=10, state='readonly')
+        self.building_combo.grid(row=row, column=1, sticky='w')
+        self.building_combo.bind('<<ComboboxSelected>>', self._on_building_type_changed)
+        row += 1
+        
+        # 地区选择下拉框
+        ttk.Label(self, text="项目地区:").grid(row=row, column=0, sticky='e', padx=(0, 5))
+        regions = list(REGION_PARAMS.keys())
+        self.region_combo = ttk.Combobox(self, textvariable=self.region_var,
+                                         values=regions, width=10, state='readonly')
+        self.region_combo.grid(row=row, column=1, sticky='w')
+        self.region_combo.bind('<<ComboboxSelected>>', self._on_region_changed)
+        row += 1
+        
+        # ========== 轴网配置 ==========
+        ttk.Separator(self, orient='horizontal').grid(
+            row=row, column=0, columnspan=3, sticky='ew', pady=10); row += 1
+        
         ttk.Label(self, text="── 轴网配置 ──", font=('SimHei', 10, 'bold')).grid(
             row=row, column=0, columnspan=2, sticky='w', pady=(0, 5))
         row += 1
@@ -66,21 +102,47 @@ class ParameterPanel(ttk.LabelFrame):
         self._add_entry(row, "首层高 (mm):", self.vars['first_story_height'], "≥3000"); row += 1
         self._add_entry(row, "标准层高 (mm):", self.vars['story_height'], "≥2800"); row += 1
         
-        # 荷载配置
+        # ========== 荷载配置 ==========
         ttk.Separator(self, orient='horizontal').grid(
             row=row, column=0, columnspan=3, sticky='ew', pady=10); row += 1
         
         ttk.Label(self, text="── 荷载配置 ──", font=('SimHei', 10, 'bold')).grid(
             row=row, column=0, columnspan=2, sticky='w', pady=(0, 5)); row += 1
         
-        self._add_entry(row, "恒载 (kN/m):", self.vars['q_dead'], ">0"); row += 1
-        self._add_entry(row, "活载 (kN/m):", self.vars['q_live'], ">0"); row += 1
-        self._add_entry(row, "基本风压 (kN/m²):", self.vars['w0'], "≥0"); row += 1
-        self._add_entry(row, "基本雪压 (kN/m²):", self.vars['s0'], "≥0"); row += 1
+        self._add_entry(row, "恒载 (kN/m²):", self.vars['q_dead'], "自动填充"); row += 1
+        self._add_entry(row, "活载 (kN/m²):", self.vars['q_live'], "自动填充"); row += 1
+        self._add_entry(row, "基本风压 (kN/m²):", self.vars['w0'], "自动填充"); row += 1
+        self._add_entry(row, "基本雪压 (kN/m²):", self.vars['s0'], "自动填充"); row += 1
         
-        # 更新按钮
+        # ========== 地震配置 ==========
+        ttk.Separator(self, orient='horizontal').grid(
+            row=row, column=0, columnspan=3, sticky='ew', pady=10); row += 1
+        
+        ttk.Label(self, text="── 地震参数 ──", font=('SimHei', 10, 'bold')).grid(
+            row=row, column=0, columnspan=2, sticky='w', pady=(0, 5)); row += 1
+        
+        self._add_entry(row, "αmax:", self.vars['alpha_max'], "0=不考虑地震"); row += 1
+        self._add_entry(row, "γ₀ (重要性系数):", self.vars['gamma_0'], "1.0-1.1"); row += 1
+        
+        # ========== 更新按钮 ==========
         ttk.Button(self, text="更新预览", command=self._on_update).grid(
             row=row, column=0, columnspan=2, pady=15, sticky='ew')
+    
+    def _on_building_type_changed(self, event=None):
+        """建筑类型改变时联动更新恒载、活载和重要性系数"""
+        building_type = self.building_type_var.get()
+        params = get_building_params(building_type)
+        self.vars['q_dead'].set(params['q_dead'])
+        self.vars['q_live'].set(params['q_live'])
+        self.vars['gamma_0'].set(params['gamma_0'])
+    
+    def _on_region_changed(self, event=None):
+        """地区改变时联动更新风压、雪压、地震参数"""
+        region = self.region_var.get()
+        params = get_region_params(region)
+        self.vars['w0'].set(params['w0'])
+        self.vars['s0'].set(params['s0'])
+        self.vars['alpha_max'].set(params['alpha_max'])
     
     def _add_entry(self, row: int, label: str, var: tk.Variable, hint: str):
         """添加标签+输入框+提示"""
@@ -140,6 +202,10 @@ class ParameterPanel(ttk.LabelFrame):
             q_live=v['q_live'].get(),
             w0=v['w0'].get(),
             s0=v['s0'].get(),
+            alpha_max=v['alpha_max'].get(),
+            gamma_0=v['gamma_0'].get(),
+            building_type=self.building_type_var.get(),
+            region=self.region_var.get(),
         )
 
 

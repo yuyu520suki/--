@@ -241,7 +241,7 @@ if __name__ == "__main__":
     grid = GridInput(
         x_spans=[6000, 6000, 6000],
         z_heights=[4000, 3500, 3500, 3500, 3500],
-        q_dead=25.0,
+        q_dead=4.5,
         q_live=2.5,  # GB 55001-2021
     )
     

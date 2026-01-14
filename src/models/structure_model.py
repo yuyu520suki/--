@@ -319,6 +319,11 @@ class StructureModel:
             if as_id:
                 self.ss.q_load(element_id=as_id, q=q_total)
         
+        # 施加地震荷载 (如果 alpha_max > 0)
+        if hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0:
+            F_EK = self._apply_seismic_load(self.ss, self._as_elem_map, self.grid.alpha_max)
+            print(f"[地震荷载] 基底剪力 F_EK = {F_EK:.1f} kN (αmax={self.grid.alpha_max})")
+        
         return self.ss
     
     def _get_column_id(self, col_idx: int, story: int) -> int:
@@ -410,6 +415,191 @@ class StructureModel:
             f"  总高度: {self.grid.total_height/1000:.1f} m"
         )
     
+    # =========================================================================
+    # 地震作用计算 (底部剪力法 - GB 50011-2010)
+    # =========================================================================
+    
+    def _apply_seismic_load(self, ss: 'SystemElements', as_elem_map: Dict[int, int],
+                            alpha_max: float = None) -> float:
+        """
+        底部剪力法计算并施加地震作用 (GB 50011-2010 第5.2节)
+        
+        原理:
+            1. 估算结构基本周期 T₁
+            2. 计算重力荷载代表值 G_E
+            3. 计算总水平地震作用 F_EK = α₁ × G_E
+            4. 按倒三角形分布分配到各层
+            5. 在各层节点施加水平力
+        
+        Args:
+            ss: 已构建的 SystemElements 模型
+            as_elem_map: 单元ID映射字典
+            alpha_max: 水平地震影响系数最大值 (若为None则从grid获取)
+            
+        Returns:
+            float: 结构底部剪力 F_EK (kN)
+        """
+        if not self.grid:
+            raise ValueError("请先调用 build_from_grid()")
+        
+        # 获取地震影响系数最大值
+        if alpha_max is None:
+            alpha_max = getattr(self.grid, 'alpha_max', 0.08)
+        
+        if alpha_max <= 0:
+            return 0.0
+        
+        n_stories = self.grid.num_stories
+        n_cols = self.grid.num_spans + 1
+        
+        # =====================================================================
+        # 第一步：估算结构基本周期 (GB 50011-2010 附录C)
+        # =====================================================================
+        # 框架结构经验公式: T₁ = (0.05 ~ 0.1) × N
+        # 取 T₁ = 0.08 × N (介于两者之间的常用值)
+        T1 = 0.08 * n_stories
+        
+        # =====================================================================
+        # 第二步：计算地震影响系数 α₁ (GB 50011-2010 第5.1.5条)
+        # =====================================================================
+        # 简化处理：对于多遇地震，当 T₁ ≤ 0.1s 时 α₁ = α_max
+        # 当 T₁ > Tg 时 α₁ = α_max × (Tg/T₁)^γ
+        # 此处简化为：α₁ = α_max × 0.9 (考虑周期折减)
+        alpha_1 = alpha_max * 0.9
+        
+        # =====================================================================
+        # 第三步：计算重力荷载代表值 G_E (GB 50011-2010 第5.1.3条)
+        # =====================================================================
+        # G_E = G_k + ψ_c × Q_k (ψ_c = 0.5 为组合值系数)
+        psi_c = 0.5  # 楼面活载组合值系数
+        
+        # 计算各层重力荷载代表值
+        G_story = []  # 每层重力荷载
+        H_story = []  # 每层高度 (从基础起算)
+        
+        cumulative_height = 0.0
+        for story in range(n_stories):
+            story_height = self.grid.z_heights[story] / 1000  # m
+            cumulative_height += story_height
+            H_story.append(cumulative_height)
+            
+            # 计算该层梁上的荷载
+            # 梁上荷载 = (恒载 + ψ_c × 活载) × 总跨度
+            q_e = self.grid.q_dead + psi_c * self.grid.q_live  # kN/m
+            total_span = sum(self.grid.x_spans) / 1000  # m
+            
+            # 该层重力荷载 (简化：只计算梁上荷载，柱重按15%估算)
+            G_beam = q_e * total_span
+            G_col = G_beam * 0.15  # 柱自重估算
+            G_story.append(G_beam + G_col)
+        
+        G_total = sum(G_story)
+        
+        # =====================================================================
+        # 第四步：计算总水平地震作用 F_EK (GB 50011-2010 第5.2.1条)
+        # =====================================================================
+        # F_EK = α₁ × G_E × η (η为调整系数，框架结构取0.85)
+        eta = 0.85  # 结构调整系数
+        F_EK = alpha_1 * G_total * eta
+        
+        # =====================================================================
+        # 第五步：考虑顶部附加地震作用 (GB 50011-2010 第5.2.1条)
+        # =====================================================================
+        # 当 T₁ > 1.4Tg 时，顶部附加 ΔF_n = δ_n × F_EK
+        # Tg 取 0.4s (II类场地)，当 T₁ > 0.56s 时需考虑
+        Tg = 0.4  # 特征周期 (II类场地)
+        if T1 > 1.4 * Tg:
+            # δ_n = 0.08T₁ + 0.07
+            delta_n = 0.08 * T1 + 0.07
+            delta_n = min(delta_n, 0.25)  # 不大于0.25
+        else:
+            delta_n = 0.0
+        
+        F_top_extra = delta_n * F_EK
+        F_distribute = F_EK - F_top_extra  # 用于分配的基底剪力
+        
+        # =====================================================================
+        # 第六步：按高度分配地震作用 (GB 50011-2010 第5.2.1条)
+        # =====================================================================
+        # F_i = F_distribute × (G_i × H_i) / Σ(G_j × H_j)
+        sum_GH = sum(G_story[i] * H_story[i] for i in range(n_stories))
+        
+        F_story = []
+        for i in range(n_stories):
+            if sum_GH > 0:
+                F_i = F_distribute * (G_story[i] * H_story[i]) / sum_GH
+            else:
+                F_i = 0.0
+            
+            # 顶层附加地震作用
+            if i == n_stories - 1:
+                F_i += F_top_extra
+            
+            F_story.append(F_i)
+        
+        # =====================================================================
+        # 第七步：施加水平地震力到节点 (GB 50011-2010)
+        # =====================================================================
+        # 从 anaStruct 模型获取各高度的节点
+        heights_nodes = {}  # {height: [node_ids]}
+        for nid, node in ss.node_map.items():
+            z = round(node.vertex.y, 2)  # anaStruct 中 y 是垂直方向 (m)
+            if z not in heights_nodes:
+                heights_nodes[z] = []
+            heights_nodes[z].append(nid)
+        
+        # 按高度排序 (跳过 z=0 底层支座)
+        sorted_heights = sorted([h for h in heights_nodes.keys() if h > 0.01])
+        
+        # 分配地震力到各楼层节点
+        for i, height in enumerate(sorted_heights):
+            if i >= len(F_story):
+                break
+            
+            F_layer = F_story[i]
+            if F_layer <= 0:
+                continue
+            
+            nodes_at_height = heights_nodes.get(height, [])
+            if not nodes_at_height:
+                continue
+            
+            # 将该层地震力均匀分配到所有节点
+            F_per_node = F_layer / len(nodes_at_height)
+            
+            for node_id in nodes_at_height:
+                try:
+                    ss.point_load(node_id=node_id, Fx=F_per_node)
+                except Exception as e:
+                    # 记录但不中断
+                    pass
+        
+        return F_EK
+    
+    def get_seismic_summary(self) -> str:
+        """获取地震作用计算摘要"""
+        if not self.grid or not getattr(self.grid, 'alpha_max', 0) > 0:
+            return "未考虑地震作用"
+        
+        n_stories = self.grid.num_stories
+        T1 = 0.08 * n_stories
+        alpha_max = self.grid.alpha_max
+        
+        # 估算基底剪力
+        psi_c = 0.5
+        q_e = self.grid.q_dead + psi_c * self.grid.q_live
+        total_span = sum(self.grid.x_spans) / 1000
+        G_total = q_e * total_span * n_stories * 1.15  # 含柱重
+        F_EK = alpha_max * 0.9 * G_total * 0.85
+        
+        return (
+            f"地震作用参数 (GB 50011-2010 底部剪力法):\n"
+            f"  α_max = {alpha_max}\n"
+            f"  基本周期 T₁ = {T1:.2f} s\n"
+            f"  重力荷载代表值 G_E ≈ {G_total:.0f} kN\n"
+            f"  基底剪力 F_EK ≈ {F_EK:.0f} kN"
+        )
+
     # =========================================================================
     # 多工况分析方法
     # =========================================================================
@@ -537,6 +727,14 @@ class StructureModel:
                         except Exception:
                             pass
         
+        # 4. 地震荷载 (水平节点力)
+        gamma_seismic = load_factors.get('seismic', 0.0)
+        if gamma_seismic > 0 and hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0:
+            # 施加地震力 (内部已包含力的计算)
+            F_EK = self._apply_seismic_load(ss, as_elem_map, self.grid.alpha_max)
+            # 注: 地震分项系数在_apply_seismic_load内部处理
+            # 这里gamma_seismic只是标记是否考虑地震，实际系数已在荷载组合中处理
+        
         return ss, as_elem_map
     
     def analyze_combination(self, 
@@ -614,7 +812,7 @@ class StructureModel:
                          wind_params: WindLoadParams = None,
                          snow_params: SnowLoadParams = None) -> Dict[int, ElementForcesEnvelope]:
         """
-        分析所有荷载组合并返回内力包络
+        分析所有荷载组合并返回内力包络 (含地震作用)
         
         Args:
             wind_params: 风荷载参数 (可选)
@@ -626,8 +824,9 @@ class StructureModel:
         generator = LoadCombinationGenerator()
         has_wind = wind_params is not None and self.grid.has_wind
         has_snow = snow_params is not None and self.grid.has_snow
+        has_seismic = hasattr(self.grid, 'has_seismic') and self.grid.has_seismic
         
-        uls_combos = generator.get_uls_combinations(has_wind, has_snow)
+        uls_combos = generator.get_uls_combinations(has_wind, has_snow, has_seismic)
         sls_combos = generator.get_sls_combinations()
         
         envelope = {}

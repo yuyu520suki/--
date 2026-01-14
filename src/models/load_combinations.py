@@ -252,9 +252,10 @@ class LoadCombinationGenerator:
     
     def get_uls_combinations(self, 
                              has_wind: bool = True, 
-                             has_snow: bool = True) -> List[LoadCombination]:
+                             has_snow: bool = True,
+                             has_seismic: bool = False) -> List[LoadCombination]:
         """
-        生成承载能力极限状态组合 (GB 50009-2012 5.3.1 / GB 55001-2021)
+        生成承载能力极限状态组合 (GB 50009-2012 / GB 55001-2021 / GB 50011-2010)
         
         基本组合的效应设计值:
         γG * SGk + γQ * ψc * SQk (永久作用控制)
@@ -263,6 +264,7 @@ class LoadCombinationGenerator:
         Args:
             has_wind: 是否包含风荷载组合
             has_snow: 是否包含雪荷载组合
+            has_seismic: 是否包含地震作用组合
             
         Returns:
             荷载组合列表
@@ -351,6 +353,24 @@ class LoadCombinationGenerator:
                     ("wind", 1.4), 
                     ("snow", 0.7 * 1.4)
                 ]
+            ))
+        
+        # ==== 地震作用组合 (GB 50011-2010 第5.4节) ====
+        if has_seismic:
+            # 地震基本组合: 1.2G + 0.6Q + 1.3E_h
+            # 注: 0.6 = 1.2 × 0.5 (重力分项系数 × 组合值系数)
+            # 地震作用分项系数 γ_Eh = 1.3 (水平地震作用)
+            combos.append(LoadCombination(
+                name="Seismic_Basic",
+                limit_state="ULS_SEISMIC",
+                factors=[("dead", 1.2), ("live", 0.6), ("seismic", 1.3)]
+            ))
+            
+            # 1.0G + 0.5Q + 1.3E_h (重力荷载效应不利向下时)
+            combos.append(LoadCombination(
+                name="Seismic_Gravity",
+                limit_state="ULS_SEISMIC",
+                factors=[("dead", 1.0), ("live", 0.5), ("seismic", 1.3)]
             ))
         
         return combos

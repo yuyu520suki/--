@@ -51,7 +51,7 @@ def main():
     grid = GridInput(
         x_spans=[6000, 6000, 6000],       # 3跨，每跨6m
         z_heights=[4000, 3500, 3500, 3500, 3500],  # 5层 (首层4m + 标准层3.5m)
-        q_dead=25.0,                      # 恒载 (kN/m)
+        q_dead=4.5,                       # 恒载 (kN/m²) - 典型办公楼
         # q_live 默认为 2.5 kN/m² (GB 55001-2021)
     )
     
@@ -60,7 +60,7 @@ def main():
     print(f"  层数: {grid.num_stories} 层")
     print(f"  总宽度: {grid.total_width/1000:.1f} m")
     print(f"  总高度: {grid.total_height/1000:.1f} m")
-    print(f"  恒载: {grid.q_dead} kN/m")
+    print(f"  恒载: {grid.q_dead} kN/m² (含楼板+装修+吊顶)")
     print(f"  活载: {grid.q_live} kN/m² (GB 55001-2021 默认值)")
     
     # ==========================================================================

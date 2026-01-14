@@ -509,6 +509,122 @@ def validate_optimization_result(grid: GridInput,
 
 
 # =============================================================================
+# 基准对比功能 (Benchmark Comparison)
+# =============================================================================
+
+def benchmark_comparison(grid, optimized_result=None, db=None, verbose: bool = True) -> Dict:
+    """
+    与经验设计基准进行对比
+    
+    基准模型: 柱 600×600 mm (索引约60), 梁 300×600 mm (索引约35)
+    
+    Args:
+        grid: GridInput 轴网输入
+        optimized_result: 优化结果 (可选)
+        db: 截面数据库
+        verbose: 是否打印详细信息
+        
+    Returns:
+        dict: {benchmark_cost, optimized_cost, savings_pct, benchmark_penalty}
+    """
+    from src.models.structure_model import StructureModel
+    
+    if db is None:
+        db = SectionDatabase()
+    
+    # =========================================================================
+    # 第一步：创建基准模型
+    # =========================================================================
+    benchmark_model = StructureModel(db)
+    benchmark_model.build_from_grid(grid)
+    
+    # 经验设计截面:
+    # - 梁 300×600 (查找最接近的索引)
+    # - 柱 600×600 (查找最接近的索引)
+    beam_sec_idx = None
+    col_sec_idx = None
+    
+    for i in range(len(db)):
+        sec = db.get_by_index(i)
+        if sec['b'] == 300 and sec['h'] == 600:
+            beam_sec_idx = i
+        if sec['b'] == 600 and sec['h'] == 600:
+            col_sec_idx = i
+    
+    # 如果没找到精确匹配，使用默认值
+    if beam_sec_idx is None:
+        beam_sec_idx = 35  # 约 300×600
+    if col_sec_idx is None:
+        col_sec_idx = 60  # 约 600×600
+    
+    # 全截面统一配置 (6基因)
+    benchmark_genes = [beam_sec_idx, beam_sec_idx, col_sec_idx, col_sec_idx, col_sec_idx, col_sec_idx]
+    benchmark_model.set_sections_by_groups(benchmark_genes)
+    benchmark_model.build_anastruct_model()
+    
+    # =========================================================================
+    # 第二步：分析并验算基准模型
+    # =========================================================================
+    forces = benchmark_model.analyze()
+    verifier = SectionVerifier(db)
+    verifier.precompute_pm_curves()
+    
+    total_penalty, _ = verifier.verify_all_elements(
+        forces,
+        benchmark_model.beam_sections,
+        benchmark_model.column_sections
+    )
+    
+    # 计算基准造价
+    benchmark_cost = 0.0
+    for beam_id in benchmark_model.beams:
+        sec = db.get_by_index(beam_sec_idx)
+        span = sum(grid.x_spans) / (grid.num_spans * 1000)  # 平均跨度 (m)
+        benchmark_cost += sec['cost_per_m'] * span
+    
+    for col_id in benchmark_model.columns:
+        sec = db.get_by_index(col_sec_idx)
+        story_idx = (col_id - grid.num_beams - 1) % grid.num_stories
+        col_height = grid.z_heights[story_idx] / 1000  # m
+        benchmark_cost += sec['cost_per_m'] * col_height
+    
+    # =========================================================================
+    # 第三步：对比
+    # =========================================================================
+    result = {
+        'benchmark_cost': round(benchmark_cost, 0),
+        'benchmark_penalty': round(total_penalty, 2),
+        'benchmark_genes': benchmark_genes,
+        'optimized_cost': None,
+        'savings_pct': None,
+    }
+    
+    if optimized_result is not None:
+        opt_cost = getattr(optimized_result, 'total_cost', optimized_result.get('total_cost', 0))
+        result['optimized_cost'] = round(opt_cost, 0)
+        if benchmark_cost > 0:
+            result['savings_pct'] = round((benchmark_cost - opt_cost) / benchmark_cost * 100, 1)
+    
+    if verbose:
+        print("=" * 60)
+        print("基准对比 (Benchmark Comparison)")
+        print("=" * 60)
+        sec_beam = db.get_by_index(beam_sec_idx)
+        sec_col = db.get_by_index(col_sec_idx)
+        print(f"基准模型: 梁 {sec_beam['b']}×{sec_beam['h']} mm, 柱 {sec_col['b']}×{sec_col['h']} mm")
+        print(f"  基准造价: {result['benchmark_cost']:.0f} 元")
+        print(f"  约束违背: {result['benchmark_penalty']:.2f}")
+        
+        if result['optimized_cost'] is not None:
+            print(f"优化结果:")
+            print(f"  优化造价: {result['optimized_cost']:.0f} 元")
+            print(f"  节省比例: {result['savings_pct']:.1f}%")
+        print("=" * 60)
+    
+    return result
+
+
+# =============================================================================
 # 测试代码
 # =============================================================================
 
