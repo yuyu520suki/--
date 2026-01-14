@@ -62,13 +62,13 @@ def check_global_equilibrium(grid: GridInput,
         print("\n▶ 第一步：计算总施加荷载")
         print("-" * 50)
         
-        # ULS荷载组合: 1.2G + 1.4Q (GB 50009-2012)
-        gamma_G = 1.2  # 恒载分项系数
-        gamma_Q = 1.4  # 活载分项系数
+        # ULS荷载组合: 1.3G + 1.5L (GB 55001-2021)
+        gamma_G = 1.3  # 恒载分项系数
+        gamma_Q = 1.5  # 活载分项系数
         q_dead = grid.q_dead  # kN/m
         q_live = grid.q_live  # kN/m
         
-        print(f"  荷载组合公式 (GB 50009-2012):")
+        print(f"  荷载组合公式 (GB 55001-2021):")
         print(f"    q_u = γ_G × G_k + γ_Q × Q_k")
         print(f"    q_u = {gamma_G} × {q_dead} + {gamma_Q} × {q_live}")
         

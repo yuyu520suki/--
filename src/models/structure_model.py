@@ -311,8 +311,8 @@ class StructureModel:
             self.ss.add_support_fixed(node_id=node_id)
         
         # 施加荷载 (梁上均布荷载 - 使用ULS设计值)
-        # GB 50009-2012: 1.2G + 1.4Q
-        q_total = -(1.2 * self.grid.q_dead + 1.4 * self.grid.q_live)  # 向下为负
+        # GB 55001-2021: 1.3G + 1.5L
+        q_total = -(1.3 * self.grid.q_dead + 1.5 * self.grid.q_live)  # 向下为负
         
         for beam_id in self.beams.keys():
             as_id = self._as_elem_map.get(beam_id)
