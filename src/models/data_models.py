@@ -104,6 +104,7 @@ class GridInput:
     z_heights: List[float]    # 层高 [mm]
     q_dead: float = 4.5       # 恒载 (kN/m²)，参考GB 50009-2012
     q_live: float = 2.5       # 活载 (kN/m²)
+    q_roof: float = 0.5       # 屋顶活载 (kN/m²), GB 50009-2012: 不上人0.5, 上人2.0
     # 注：恒载4.5 kN/m² 典型组成 = 120mm楼板(3.0) + 装修面层(1.0) + 吊顶(0.5)
     
     # 风荷载和雪荷载参数 (可选)

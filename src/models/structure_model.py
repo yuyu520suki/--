@@ -312,11 +312,22 @@ class StructureModel:
         
         # 施加荷载 (梁上均布荷载 - 使用ULS设计值)
         # GB 55001-2021: 1.3G + 1.5L
-        q_total = -(1.3 * self.grid.q_dead + 1.5 * self.grid.q_live)  # 向下为负
+        # 区分屋顶层和标准层活荷载 (GB 50009-2012 表5.3.1)
+        q_roof_live = getattr(self.grid, 'q_roof', 0.5)  # 屋顶活载，默认不上人0.5
         
         for beam_id in self.beams.keys():
             as_id = self._as_elem_map.get(beam_id)
             if as_id:
+                # 判断是否为屋面梁（最顶层梁）
+                beam_count = self.grid.num_spans
+                total_beams = beam_count * self.grid.num_stories
+                is_roof_beam = beam_id > (total_beams - beam_count)
+                
+                if is_roof_beam:
+                    q_total = -(1.3 * self.grid.q_dead + 1.5 * q_roof_live)
+                else:
+                    q_total = -(1.3 * self.grid.q_dead + 1.5 * self.grid.q_live)
+                
                 self.ss.q_load(element_id=as_id, q=q_total)
         
         # 施加地震荷载 (如果 alpha_max > 0)

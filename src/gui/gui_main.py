@@ -49,6 +49,7 @@ class ParameterPanel(ttk.LabelFrame):
             'story_height': tk.DoubleVar(value=3500),
             'q_dead': tk.DoubleVar(value=4.5),
             'q_live': tk.DoubleVar(value=2.5),   # GB 55001-2021 住宅楼面活荷载
+            'q_roof': tk.DoubleVar(value=0.5),   # GB 50009-2012 不上人屋面
             'w0': tk.DoubleVar(value=0.35),       # 六安基本风压
             's0': tk.DoubleVar(value=0.55),       # 六安基本雪压
             'alpha_max': tk.DoubleVar(value=0.08),  # 六安地震影响系数最大值
@@ -58,6 +59,7 @@ class ParameterPanel(ttk.LabelFrame):
         # 下拉框变量
         self.building_type_var = tk.StringVar(value="办公")
         self.region_var = tk.StringVar(value="六安")
+        self.roof_type_var = tk.StringVar(value="不上人屋面")
         
         self._create_widgets()
     
@@ -111,6 +113,17 @@ class ParameterPanel(ttk.LabelFrame):
         
         self._add_entry(row, "恒载 (kN/m²):", self.vars['q_dead'], "自动填充"); row += 1
         self._add_entry(row, "活载 (kN/m²):", self.vars['q_live'], "自动填充"); row += 1
+        
+        # 屋顶类型下拉框
+        ttk.Label(self, text="屋顶类型:").grid(row=row, column=0, sticky='e', padx=(0, 5))
+        roof_types = ['不上人屋面', '上人屋面']
+        self.roof_combo = ttk.Combobox(self, textvariable=self.roof_type_var,
+                                       values=roof_types, width=10, state='readonly')
+        self.roof_combo.grid(row=row, column=1, sticky='w')
+        self.roof_combo.bind('<<ComboboxSelected>>', self._on_roof_type_changed)
+        row += 1
+        
+        self._add_entry(row, "屋顶活载 (kN/m²):", self.vars['q_roof'], "GB 50009"); row += 1
         self._add_entry(row, "基本风压 (kN/m²):", self.vars['w0'], "自动填充"); row += 1
         self._add_entry(row, "基本雪压 (kN/m²):", self.vars['s0'], "自动填充"); row += 1
         
@@ -143,6 +156,14 @@ class ParameterPanel(ttk.LabelFrame):
         self.vars['w0'].set(params['w0'])
         self.vars['s0'].set(params['s0'])
         self.vars['alpha_max'].set(params['alpha_max'])
+    
+    def _on_roof_type_changed(self, event=None):
+        """屋顶类型改变时更新屋顶活载 (GB 50009-2012 表5.3.1)"""
+        roof_type = self.roof_type_var.get()
+        if roof_type == '不上人屋面':
+            self.vars['q_roof'].set(0.5)
+        else:  # 上人屋面
+            self.vars['q_roof'].set(2.0)
     
     def _add_entry(self, row: int, label: str, var: tk.Variable, hint: str):
         """添加标签+输入框+提示"""
@@ -200,6 +221,7 @@ class ParameterPanel(ttk.LabelFrame):
             z_heights=z_heights,
             q_dead=v['q_dead'].get(),
             q_live=v['q_live'].get(),
+            q_roof=v['q_roof'].get(),
             w0=v['w0'].get(),
             s0=v['s0'].get(),
             alpha_max=v['alpha_max'].get(),
@@ -384,28 +406,41 @@ class FrameCanvas(tk.Canvas):
             self.create_text(sx - 25, sy, text=text, font=('Arial', 8))
     
     def _draw_loads(self, grid: GridInput, to_screen, scale):
-        """绘制荷载示意"""
-        # 只在顶层梁上画荷载箭头
-        z_top = sum(grid.z_heights)
+        """绘制荷载示意 - 每层都显示，区分屋顶和标准层"""
         arrow_len = 15
+        n_stories = grid.num_stories
         
-        for i in range(grid.num_spans):
-            x_left = sum(grid.x_spans[:i])
-            x_right = x_left + grid.x_spans[i]
+        # 使用实际的荷载值
+        q_standard = grid.q_dead + grid.q_live  # 标准层
+        q_roof_val = grid.q_dead + getattr(grid, 'q_roof', 0.5)  # 屋顶 (使用用户设置的屋顶活荷载)
+        
+        for j in range(n_stories):
+            z = sum(grid.z_heights[:j+1])  # 该层标高
+            is_roof = (j == n_stories - 1)
             
-            # 每跨画3个箭头
-            for k in range(3):
-                x = x_left + grid.x_spans[i] * (k + 1) / 4
-                sx, sy = to_screen(x, z_top)
+            # 颜色区分：屋顶用紫色，标准层用橙色
+            color = '#9C27B0' if is_roof else '#FF5722'
+            
+            for i in range(grid.num_spans):
+                x_left = sum(grid.x_spans[:i])
                 
-                self.create_line(sx, sy - arrow_len, sx, sy - 3,
-                               fill='#FF5722', width=1, arrow='last', arrowshape=(4, 5, 2))
+                # 每跨画3个箭头
+                for k in range(3):
+                    x = x_left + grid.x_spans[i] * (k + 1) / 4
+                    sx, sy = to_screen(x, z)
+                    
+                    self.create_line(sx, sy - arrow_len, sx, sy - 3,
+                                   fill=color, width=1, arrow='last', 
+                                   arrowshape=(4, 5, 2))
         
-        # 荷载数值标注
-        q = grid.q_dead + grid.q_live
-        sx, _ = to_screen(sum(grid.x_spans) / 2, z_top)
-        self.create_text(sx, 20, text=f"q = {q:.0f} kN/m",
-                       font=('Arial', 9), fill='#FF5722')
+        # 荷载数值标注 - 顶部显示两种荷载说明
+        sx_mid, _ = to_screen(sum(grid.x_spans) / 2, sum(grid.z_heights))
+        self.create_text(sx_mid - 60, 18, 
+                        text=f"标准层: {q_standard:.1f} kN/m²",
+                        font=('Arial', 8), fill='#FF5722')
+        self.create_text(sx_mid + 60, 18, 
+                        text=f"屋顶层: {q_roof_val:.1f} kN/m²",
+                        font=('Arial', 8), fill='#9C27B0')
     
     def _draw_legend(self):
         """绘制图例"""
@@ -636,8 +671,8 @@ class FrameOptimizerGUI(tk.Tk):
         super().__init__()
         
         self.title("RC框架结构优化系统 v2.0 | GB 55001-2021")
-        self.geometry("1100x650")
-        self.minsize(900, 550)
+        self.geometry("1350x720")
+        self.minsize(1200, 650)
         
         # 数据
         self.db = SectionDatabase()
