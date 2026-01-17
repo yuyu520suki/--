@@ -81,7 +81,36 @@ def check_symmetry(grid: GridInput,
             print(f"\n  ⚠ 结论：轴网不对称，跳过对称性检查")
             return True, result
         
-        print(f"\n  ✓ 轴网对称，继续检查内力对称性")
+        print(f"\n  ✓ 轴网对称")
+        
+        # =====================================================================
+        # 第一步续：检查荷载是否对称（水平荷载会打破对称性）
+        # =====================================================================
+        print("\n▶ 第一步续：检查荷载对称性")
+        print("-" * 50)
+        
+        has_horizontal_load = False
+        horizontal_load_type = []
+        
+        # 检查地震荷载
+        if hasattr(grid, 'alpha_max') and grid.alpha_max > 0:
+            has_horizontal_load = True
+            horizontal_load_type.append(f"地震 (αmax={grid.alpha_max})")
+            
+        # 检查风荷载
+        if hasattr(grid, 'w0') and grid.w0 > 0:
+            has_horizontal_load = True
+            horizontal_load_type.append(f"风 (w0={grid.w0} kN/m²)")
+        
+        if has_horizontal_load:
+            result['passed'] = True
+            result['message'] = f"⚠ 存在水平荷载 ({', '.join(horizontal_load_type)})，跳过对称性检查"
+            print(f"  检测到水平荷载: {', '.join(horizontal_load_type)}")
+            print(f"\n  ⚠ 结论：水平荷载会打破内力对称性，这是正常物理现象，跳过检查")
+            print("=" * 70)
+            return True, result
+        
+        print(f"  ✓ 仅有竖向荷载，继续检查内力对称性")
         
         # =====================================================================
         # 第二步：收集柱和梁的内力数据

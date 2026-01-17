@@ -322,7 +322,7 @@ class StructureModel:
         # 施加地震荷载 (如果 alpha_max > 0)
         if hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0:
             F_EK = self._apply_seismic_load(self.ss, self._as_elem_map, self.grid.alpha_max)
-            print(f"[地震荷载] 基底剪力 F_EK = {F_EK:.1f} kN (αmax={self.grid.alpha_max})")
+            # 注: 不再打印，避免优化过程中大量输出
         
         return self.ss
     

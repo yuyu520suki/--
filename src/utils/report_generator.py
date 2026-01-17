@@ -1,6 +1,6 @@
 """
 报表生成器模块 - Excel报表和可视化图表
-包括P-M曲线图、框架内力图、收敛曲线
+包括P-M曲线图、框架内力图、收敛曲线、水平荷载效应图
 """
 
 import sys
@@ -221,18 +221,22 @@ def generate_word_report(result: OptimizationResult,
         run.element.rPr.rFonts.set(qn('w:eastAsia'), '黑体')
     
     doc.add_heading('2.1 执行规范', level=2)
-    doc.add_paragraph('1. 《混凝土结构设计规范》 (GB 50010-2010)')
-    doc.add_paragraph('2. 《建筑结构荷载规范》 (GB 50009-2012)')
+    doc.add_paragraph('1. 《工程结构通用规范》 (GB 55001-2021)')
+    doc.add_paragraph('2. 《混凝土结构设计规范》 (GB 50010-2010)')
+    doc.add_paragraph('3. 《建筑结构荷载规范》 (GB 50009-2012)')
+    doc.add_paragraph('4. 《建筑抗震设计规范》 (GB 50011-2010)')
     
     doc.add_heading('2.2 荷载信息', level=2)
-    doc.add_paragraph(f'• 恒载 (Dead Load): {grid.q_dead} kN/m')
-    doc.add_paragraph(f'• 活载 (Live Load): {grid.q_live} kN/m')
+    doc.add_paragraph(f'• 恒载 (Dead Load): {grid.q_dead} kN/m² (含楼板+装修)')
+    doc.add_paragraph(f'• 活载 (Live Load): {grid.q_live} kN/m² (GB 55001-2021 表4.2.2)')
     if hasattr(grid, 'w0') and grid.w0 > 0:
-        doc.add_paragraph(f'• 基本风压: {grid.w0} kN/m² (GB 50009-2012)')
+        doc.add_paragraph(f'• 基本风压: {grid.w0} kN/m² (50年重现期)')
     if hasattr(grid, 's0') and grid.s0 > 0:
-        doc.add_paragraph(f'• 基本雪压: {grid.s0} kN/m² (GB 50009-2012)')
+        doc.add_paragraph(f'• 基本雪压: {grid.s0} kN/m² (50年重现期)')
+    if hasattr(grid, 'alpha_max') and grid.alpha_max > 0:
+        doc.add_paragraph(f'• 水平地震影响系数: αmax = {grid.alpha_max} (GB 50011-2010)')
     
-    doc.add_heading('2.3 荷载组合 (GB 50009-2012)', level=2)
+    doc.add_heading('2.3 荷载组合 (GB 55001-2021)', level=2)
     combo_table = doc.add_table(rows=1, cols=2)
     combo_table.style = 'Table Grid'
     combo_hdr = combo_table.rows[0].cells
@@ -240,13 +244,13 @@ def generate_word_report(result: OptimizationResult,
     combo_hdr[1].text = '荷载组合'
     
     combos = [
-        ('承载能力 ULS', '1.2G+1.4Q, 1.35G+0.98Q'),
-        ('正常使用 SLS', 'G+Q (标准), G+0.4Q (准永久)'),
+        ('承载能力 ULS', '1.3G+1.5L (主组合), 1.3G+1.05L'),
+        ('正常使用 SLS', 'G+Q (标准), G+0.5Q (准永久)'),
     ]
     if hasattr(grid, 'w0') and grid.w0 > 0:
-        combos[0] = ('承载能力 ULS', '1.2G+1.4Q, 1.2G+1.4W, 1.2G+0.98Q+1.4W')
+        combos[0] = ('承载能力 ULS', '1.3G+1.5L, 1.3G+1.5W, 1.3G+1.05L+1.5W')
     if hasattr(grid, 's0') and grid.s0 > 0:
-        combos[0] = ('承载能力 ULS', combos[0][1] + ', 1.2G+1.4S')
+        combos[0] = ('承载能力 ULS', combos[0][1] + ', 1.3G+1.5S')
     
     for state, combo in combos:
         row = combo_table.add_row().cells
@@ -364,6 +368,33 @@ def generate_word_report(result: OptimizationResult,
                     f"体现了遗传算法在解决离散变量非线性优化问题上的优越性。"
                 )
                 doc.add_paragraph(analysis_text)
+        
+        # 添加水平荷载效应图
+        if 'seismic' in image_paths and Path(image_paths['seismic']).exists():
+            doc.add_heading('4.4 水平荷载效应分析', level=2)
+            doc.add_picture(image_paths['seismic'], width=Cm(16))
+            doc.add_paragraph('图 4-4: 水平荷载效应分布图 (地震/风荷载)')
+            
+            # 添加详细说明
+            seismic_text = (
+                f"水平荷载效应分析说明：\n"
+                f"1. 计算方法: 采用GB 50011-2010底部剪力法。\n"
+                f"2. 水平力分布: 按各楼层重力荷载与高度乘积比例分配，顶层水平力最大。\n"
+                f"3. 层间剪力: 从顶层至底层逐层累加，基底剪力等于各层水平力总和。\n"
+                f"4. 倾覆力矩: 各层水平力对基础产生的力矩总和，用于计算柱轴力增量。\n"
+                f"5. 柱轴力增量: 边柱轴力增量 dN = M_total / B，影响柱截面设计。"
+            )
+            doc.add_paragraph(seismic_text)
+            
+            # 如果有地震参数，添加参数说明
+            if hasattr(grid, 'alpha_max') and grid.alpha_max > 0:
+                param_text = (
+                    f"\n设计参数：\n"
+                    f"• 水平地震影响系数最大值 amax = {grid.alpha_max}\n"
+                    f"• 结构基本周期 T1 = 0.08 x N = 0.08 x {grid.num_stories} = {0.08*grid.num_stories:.2f}s\n"
+                    f"• 设计地震分组: {grid.seismic_group if hasattr(grid, 'seismic_group') else '2'}组"
+                )
+                doc.add_paragraph(param_text)
 
     # 确保输出路径干净
     import os
@@ -749,9 +780,317 @@ def plot_convergence(cost_history: List[float],
 
 
 # =============================================================================
+# 地震/水平荷载效应可视化
+# =============================================================================
+
+def plot_seismic_load_diagram(grid: GridInput,
+                               model = None,
+                               output_path: str = "水平荷载效应图.png") -> Dict:
+    """
+    绘制地震/水平荷载效应示意图
+    
+    包含：
+    1. 框架立面 + 水平力分布箭头
+    2. 层间剪力分布图
+    3. 倾覆力矩/柱轴力增量分布图
+    
+    Args:
+        grid: 轴网配置 (必须包含 alpha_max)
+        model: 结构模型 (可选，用于获取实际内力)
+        output_path: 输出文件路径
+        
+    Returns:
+        Dict: 计算结果数据
+    """
+    # 检查是否有水平荷载
+    has_seismic = hasattr(grid, 'alpha_max') and grid.alpha_max > 0
+    has_wind = hasattr(grid, 'w0') and grid.w0 > 0
+    
+    if not has_seismic and not has_wind:
+        print("⚠ 无水平荷载，跳过水平荷载效应图")
+        return {}
+    
+    n_stories = grid.num_stories
+    n_spans = grid.num_spans
+    
+    # ========================================================================
+    # 计算地震作用 (GB 50011-2010 底部剪力法)
+    # ========================================================================
+    
+    # 基本周期估算
+    T1 = 0.08 * n_stories
+    
+    # 地震影响系数
+    alpha_max = getattr(grid, 'alpha_max', 0.08)
+    alpha_1 = alpha_max * 0.9
+    
+    # 重力荷载代表值
+    psi_c = 0.5
+    q_e = grid.q_dead + psi_c * grid.q_live  # kN/m
+    total_span = sum(grid.x_spans) / 1000  # m
+    
+    # 各层重力荷载和高度
+    G_story = []
+    H_story = []  # 累计高度
+    h_story = []  # 层高
+    cumulative_height = 0.0
+    
+    for story in range(n_stories):
+        story_height = grid.z_heights[story] / 1000  # m
+        h_story.append(story_height)
+        cumulative_height += story_height
+        H_story.append(cumulative_height)
+        
+        G_beam = q_e * total_span
+        G_col = G_beam * 0.15
+        G_story.append(G_beam + G_col)
+    
+    G_total = sum(G_story)
+    
+    # 基底剪力
+    eta = 0.85
+    F_EK = alpha_1 * G_total * eta
+    
+    # 顶部附加地震作用
+    Tg = 0.4
+    if T1 > 1.4 * Tg:
+        delta_n = min(0.08 * T1 + 0.07, 0.25)
+    else:
+        delta_n = 0.0
+    
+    F_top_extra = delta_n * F_EK
+    F_distribute = F_EK - F_top_extra
+    
+    # 各层地震力分配 (倒三角形)
+    sum_GH = sum(G_story[i] * H_story[i] for i in range(n_stories))
+    
+    F_story = []
+    for i in range(n_stories):
+        if sum_GH > 0:
+            F_i = F_distribute * (G_story[i] * H_story[i]) / sum_GH
+        else:
+            F_i = 0.0
+        
+        if i == n_stories - 1:
+            F_i += F_top_extra
+        
+        F_story.append(F_i)
+    
+    # 计算层间剪力 (从顶到底累加)
+    V_story = []
+    V_cumulative = 0.0
+    for i in range(n_stories - 1, -1, -1):
+        V_cumulative += F_story[i]
+        V_story.insert(0, V_cumulative)
+    
+    # 计算倾覆力矩 (各楼层对基础的力矩)
+    M_overturn = []
+    for i in range(n_stories):
+        M_i = F_story[i] * H_story[i]
+        M_overturn.append(M_i)
+    
+    M_total = sum(M_overturn)
+    
+    # 柱轴力增量 (简化：按倾覆力矩估算)
+    # ΔN = M_total / (B × n_cols), B = 总宽度
+    B = total_span
+    n_cols = n_spans + 1
+    if B > 0 and n_cols > 1:
+        delta_N_edge = M_total / (B * (n_cols - 1))  # 边柱轴力增量
+    else:
+        delta_N_edge = 0
+    
+    # ========================================================================
+    # 创建可视化图表
+    # ========================================================================
+    fig = plt.figure(figsize=(16, 10))
+    
+    # 子图1: 框架立面 + 水平力箭头
+    ax1 = fig.add_subplot(2, 2, 1)
+    _draw_frame_with_seismic(ax1, grid, H_story, F_story, F_EK)
+    
+    # 子图2: 水平力和层间剪力分布
+    ax2 = fig.add_subplot(2, 2, 2)
+    _draw_shear_distribution(ax2, H_story, F_story, V_story)
+    
+    # 子图3: 倾覆力矩和柱轴力增量
+    ax3 = fig.add_subplot(2, 2, 3)
+    _draw_moment_distribution(ax3, H_story, M_overturn, M_total, delta_N_edge, B)
+    
+    # 子图4: 参数汇总表
+    ax4 = fig.add_subplot(2, 2, 4)
+    _draw_seismic_summary(ax4, grid, T1, alpha_1, G_total, F_EK, V_story[0], M_total)
+    
+    plt.suptitle('水平荷载效应分析 (GB 50011-2010 底部剪力法)', fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"✓ 水平荷载效应图已保存: {output_path}")
+    plt.close()
+    
+    # 返回计算数据
+    return {
+        'T1': T1,
+        'alpha_1': alpha_1,
+        'G_total': G_total,
+        'F_EK': F_EK,
+        'F_story': F_story,
+        'V_story': V_story,
+        'M_total': M_total,
+        'delta_N_edge': delta_N_edge,
+    }
+
+
+def _draw_frame_with_seismic(ax, grid: GridInput, H_story: List, F_story: List, F_EK: float):
+    """绘制框架立面 + 水平力箭头"""
+    n_stories = grid.num_stories
+    n_spans = grid.num_spans
+    total_width = sum(grid.x_spans) / 1000  # m
+    total_height = sum(grid.z_heights) / 1000  # m
+    
+    # 绘制框架轮廓
+    for i in range(n_spans + 1):
+        x = sum(grid.x_spans[:i]) / 1000
+        ax.plot([x, x], [0, total_height], 'k-', linewidth=2)
+    
+    for j in range(n_stories + 1):
+        z = sum(grid.z_heights[:j]) / 1000
+        ax.plot([0, total_width], [z, z], 'k-', linewidth=1.5)
+    
+    # 绘制固定支座
+    for i in range(n_spans + 1):
+        x = sum(grid.x_spans[:i]) / 1000
+        ax.plot([x-0.15, x+0.15, x, x-0.15], [-0.1, -0.1, 0, -0.1], 'k-', linewidth=1.5)
+    
+    # 绘制水平力箭头
+    max_F = max(F_story) if F_story else 1
+    arrow_scale = total_width * 0.4 / max_F
+    
+    for i, (h, F) in enumerate(zip(H_story, F_story)):
+        arrow_len = F * arrow_scale
+        ax.arrow(-arrow_len - 0.2, h, arrow_len, 0, 
+                head_width=0.15, head_length=0.1, fc='red', ec='red', linewidth=2)
+        ax.text(-arrow_len - 0.4, h, f'{F:.1f} kN', va='center', ha='right', 
+               fontsize=9, color='red')
+    
+    # 标注
+    ax.set_title(f'水平地震力分布 (F_EK={F_EK:.1f} kN)', fontsize=11)
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Z (m)')
+    ax.set_xlim(-total_width * 0.8, total_width * 1.1)
+    ax.set_ylim(-0.5, total_height + 0.5)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+
+
+def _draw_shear_distribution(ax, H_story: List, F_story: List, V_story: List):
+    """绘制层间剪力分布图"""
+    n_stories = len(H_story)
+    
+    # 水平力 (阶梯图)
+    heights_F = [0] + H_story
+    values_F = [0] + F_story
+    
+    # 层间剪力 (阶梯图)
+    heights_V = [0] + H_story
+    values_V = V_story + [0]
+    
+    # 绘制层间剪力
+    for i in range(n_stories):
+        h_bottom = heights_V[i]
+        h_top = heights_V[i + 1]
+        V = values_V[i]
+        ax.fill_betweenx([h_bottom, h_top], 0, V, alpha=0.3, color='blue', step='post')
+        ax.plot([V, V], [h_bottom, h_top], 'b-', linewidth=2)
+        ax.text(V + 2, (h_bottom + h_top) / 2, f'{V:.1f}', va='center', fontsize=9, color='blue')
+    
+    # 绘制楼层水平力
+    for i, (h, F) in enumerate(zip(H_story, F_story)):
+        ax.plot(F, h, 'r^', markersize=10)
+        ax.text(F + 2, h + 0.2, f'{F:.1f}', fontsize=8, color='red')
+    
+    ax.axvline(x=0, color='k', linewidth=0.5)
+    ax.set_xlabel('力 (kN)')
+    ax.set_ylabel('高度 Z (m)')
+    ax.set_title('层间剪力分布', fontsize=11)
+    ax.legend(['层间剪力 V', '楼层水平力 F'], loc='upper right')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-5, max(V_story) * 1.3)
+
+
+def _draw_moment_distribution(ax, H_story: List, M_overturn: List, M_total: float, delta_N: float, B: float):
+    """绘制倾覆力矩分布图"""
+    n_stories = len(H_story)
+    
+    # 累计倾覆力矩
+    M_cumulative = []
+    M_cum = 0
+    for i in range(n_stories - 1, -1, -1):
+        M_cum += M_overturn[i]
+        M_cumulative.insert(0, M_cum)
+    
+    # 绘制倾覆力矩
+    heights = [0] + H_story
+    moments = M_cumulative + [0]
+    
+    ax.fill_betweenx(H_story, 0, M_cumulative, alpha=0.3, color='orange')
+    ax.plot(M_cumulative, H_story, 'o-', color='orange', linewidth=2, markersize=8)
+    
+    for h, M in zip(H_story, M_cumulative):
+        ax.text(M + 5, h, f'{M:.0f}', va='center', fontsize=9, color='darkorange')
+    
+    ax.axvline(x=0, color='k', linewidth=0.5)
+    ax.set_xlabel('倾覆力矩 (kN*m)')
+    ax.set_ylabel('高度 Z (m)')
+    ax.set_title(f'倾覆力矩分布 (M_total={M_total:.0f} kN*m)', fontsize=11)
+    ax.grid(True, alpha=0.3)
+    
+    # 添加柱轴力增量说明
+    ax.text(0.95, 0.05, f'边柱轴力增量 dN = {delta_N:.1f} kN\n(按 M/B 估算)', 
+           transform=ax.transAxes, fontsize=9, ha='right', va='bottom',
+           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+
+def _draw_seismic_summary(ax, grid: GridInput, T1: float, alpha_1: float, 
+                          G_total: float, F_EK: float, V_base: float, M_total: float):
+    """绘制参数汇总表"""
+    ax.axis('off')
+    
+    # 表格数据 (使用ASCII兼容字符避免字体显示问题)
+    data = [
+        ['参数', '数值', '说明'],
+        ['结构周期 T1', f'{T1:.2f} s', '经验公式 0.08N'],
+        ['地震影响系数 a1', f'{alpha_1:.3f}', f'amax={grid.alpha_max}*0.9'],
+        ['重力荷载代表值 GE', f'{G_total:.0f} kN', 'G + 0.5Q'],
+        ['基底剪力 FEK', f'{F_EK:.1f} kN', 'a1*GE*eta'],
+        ['基底剪力 Vbase', f'{V_base:.1f} kN', '= FEK'],
+        ['总倾覆力矩 Mtotal', f'{M_total:.0f} kN*m', 'Sum(Fi*Hi)'],
+    ]
+    
+    # 添加风荷载信息（如果有）
+    if hasattr(grid, 'w0') and grid.w0 > 0:
+        data.append(['基本风压 w0', f'{grid.w0} kN/m2', 'GB 50009-2012'])
+    
+    # 创建表格
+    table = ax.table(cellText=data, loc='center', cellLoc='center',
+                    colWidths=[0.35, 0.25, 0.4])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.8)
+    
+    # 设置表头样式
+    for j in range(3):
+        table[(0, j)].set_facecolor('#4472C4')
+        table[(0, j)].set_text_props(color='white', fontweight='bold')
+    
+    ax.set_title('地震作用计算参数 (GB 50011-2010)', fontsize=11, pad=20)
+
+
+# =============================================================================
 # 测试代码
 # =============================================================================
 
 if __name__ == "__main__":
     print("报表生成器模块测试")
     print("请运行 main.py 进行完整测试")
+

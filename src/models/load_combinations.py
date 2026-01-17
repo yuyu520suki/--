@@ -16,30 +16,40 @@ from typing import List, Tuple, Dict, Optional
 
 
 # =============================================================================
-# 分项系数 (GB 50009-2012 表4.1.1)
+# 分项系数 (GB 55001-2021 第 3.1.13 条)
 # =============================================================================
+# 依据: GB 55001-2021 工程结构通用规范
+#   - 永久作用（不利时）: 不应小于 1.3
+#   - 可变作用（不利时）: 不应小于 1.5 (标准值≤4kN/m²); 1.4 (标准值>4kN/m²)
+#   - 预应力（不利时）: 不应小于 1.3
 
-GAMMA_G = 1.2       # 永久作用分项系数 (对结构不利时)
+GAMMA_G = 1.3       # 永久作用分项系数 (对结构不利时) [GB 55001-2021]
 GAMMA_G_FAV = 1.0   # 永久作用分项系数 (对结构有利时)
-GAMMA_Q = 1.4       # 可变作用分项系数
+GAMMA_Q = 1.5       # 可变作用分项系数 (≤4kN/m², 如办公楼) [GB 55001-2021]
+GAMMA_Q_HEAVY = 1.4 # 可变作用分项系数 (>4kN/m², 如工业厂房)
 
 
 # =============================================================================
-# 组合值系数 (GB 50009-2012 表5.1.1)
+# 组合值系数 (GB 55001-2021 表 4.2.2 / 4.5.7 / 4.6.10)
 # =============================================================================
 
-# 组合值系数 ψc
+# 组合值系数 ψc (GB 55001-2021)
 PSI_C = {
-    'live': 0.7,    # 民用楼面活荷载
-    'wind': 0.6,    # 风荷载
-    'snow': 0.7,    # 雪荷载
+    'live': 0.7,    # 民用楼面活荷载 (表4.2.2)
+    'wind': 0.6,    # 风荷载 (4.6.10)
+    'snow': 0.7,    # 雪荷载 (4.5.7)
 }
 
-# 准永久值系数 ψq
+# 准永久值系数 ψq (GB 55001-2021 表 4.2.2)
+# 注意: 不同建筑类型有不同取值:
+#   - 住宅/宿舍: 0.4
+#   - 办公楼: 0.5
+#   - 商场: 0.5
+#   - 书库/档案馆: 0.8
 PSI_Q = {
-    'live': 0.4,    # 民用楼面活荷载
+    'live': 0.5,    # 民用楼面活荷载 (办公楼默认)
     'wind': 0.0,    # 风荷载
-    'snow': 0.2,    # 雪荷载
+    'snow': 0.2,    # 雪荷载 (表4.5.7, 需按气候区取值)
 }
 
 
@@ -271,74 +281,68 @@ class LoadCombinationGenerator:
         """
         combos = []
         
-        # ==== GB 55001-2021 默认校核组合 ====
-        # 依据 GB 55001-2021 第 3.1.13 条调整。
-        # 注意：此组合用于最终校核，GA 内部适应度计算可保留原逻辑以保证搜索多样性。
+        # ==== 基本组合 (GB 55001-2021 第 3.1.13 条) ====
+        # 永久作用分项系数: ≥1.3 (不利)
+        # 可变作用分项系数: ≥1.5 (标准值≤4kN/m²)
+        
+        # 主组合: 1.3G + 1.5L (可变作用控制)
         combos.append(LoadCombination(
             name="1.3G+1.5L",
             limit_state="ULS",
-            factors=[("dead", 1.3), ("live", 1.5)]
+            factors=[("dead", GAMMA_G), ("live", GAMMA_Q)]
         ))
         
-        # ==== 永久+活载组合 (GB 50009-2012) ====
-        # 1.2G + 1.4Q (可变作用控制)
+        # 永久作用控制组合: 1.3G + 1.05L (0.7×1.5=1.05)
         combos.append(LoadCombination(
-            name="1.2G+1.4Q",
+            name="1.3G+1.05L",
             limit_state="ULS",
-            factors=[("dead", 1.2), ("live", 1.4)]
-        ))
-        
-        # 1.35G + 0.98Q (永久作用控制, 0.7×1.4=0.98)
-        combos.append(LoadCombination(
-            name="1.35G+0.98Q",
-            limit_state="ULS",
-            factors=[("dead", 1.35), ("live", 0.7 * 1.4)]
+            factors=[("dead", GAMMA_G), ("live", PSI_C['live'] * GAMMA_Q)]
         ))
         
         # ==== 含风荷载组合 ====
         if has_wind:
-            # 1.2G + 1.4W (纯风控制)
+            # 1.3G + 1.5W (风荷载控制)
             combos.append(LoadCombination(
-                name="1.2G+1.4W",
+                name="1.3G+1.5W",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("wind", 1.4)]
+                factors=[("dead", GAMMA_G), ("wind", GAMMA_Q)]
             ))
             
-            # 1.2G + 0.98Q + 1.4W (风为主，活载参与组合)
+            # 1.3G + 1.05L + 1.5W (风为主，活载参与组合)
             combos.append(LoadCombination(
-                name="1.2G+0.98Q+1.4W",
+                name="1.3G+1.05L+1.5W",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("live", 0.7 * 1.4), ("wind", 1.4)]
+                factors=[("dead", GAMMA_G), ("live", PSI_C['live'] * GAMMA_Q), ("wind", GAMMA_Q)]
             ))
             
-            # 1.2G + 1.4Q + 0.84W (活载为主，风参与组合)
+            # 1.3G + 1.5L + 0.9W (活载为主，风参与组合; 0.6×1.5=0.9)
             combos.append(LoadCombination(
-                name="1.2G+1.4Q+0.84W",
+                name="1.3G+1.5L+0.9W",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("live", 1.4), ("wind", 0.6 * 1.4)]
+                factors=[("dead", GAMMA_G), ("live", GAMMA_Q), ("wind", PSI_C['wind'] * GAMMA_Q)]
             ))
         
         # ==== 含雪荷载组合 ====
         if has_snow:
-            # 1.2G + 1.4S (纯雪控制)
+            # 1.3G + 1.5S (雪荷载控制)
             combos.append(LoadCombination(
-                name="1.2G+1.4S",
+                name="1.3G+1.5S",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("snow", 1.4)]
+                factors=[("dead", GAMMA_G), ("snow", GAMMA_Q)]
             ))
             
-            # 1.2G + 0.98Q + 1.4S (雪为主)
+            # 1.3G + 1.05L + 1.5S (雪为主)
             combos.append(LoadCombination(
-                name="1.2G+0.98Q+1.4S",
+                name="1.3G+1.05L+1.5S",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("live", 0.7 * 1.4), ("snow", 1.4)]
+                factors=[("dead", GAMMA_G), ("live", PSI_C['live'] * GAMMA_Q), ("snow", GAMMA_Q)]
             ))
             
-            # 1.2G + 1.4Q + 0.98S (活载为主，雪参与)
+            # 1.3G + 1.5L + 1.05S (活载为主，雪参与; 0.7×1.5=1.05)
             combos.append(LoadCombination(
-                name="1.2G+1.4Q+0.98S",
+                name="1.3G+1.5L+1.05S",
                 limit_state="ULS",
-                factors=[("dead", 1.2), ("live", 1.4), ("snow", 0.7 * 1.4)]
+                factors=[("dead", GAMMA_G), ("live", GAMMA_Q), ("snow", PSI_C['snow'] * GAMMA_Q)]
             ))
         
         # ==== 风+雪组合 ====

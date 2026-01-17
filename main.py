@@ -97,12 +97,18 @@ def main():
     path_pm = str(output_dir / "PM曲线图.png")
     path_frame = str(output_dir / "框架内力图.png")
     path_conv = str(output_dir / "收敛曲线.png")
+    path_seismic = str(output_dir / "水平荷载效应图.png")
     path_word = str(output_dir / "设计计算书.docx")
     
     # 1. 绘制所有图表
     plot_pm_diagrams(result, optimizer.model, db, output_path=path_pm)
     plot_frame_diagrams(result, optimizer.model, grid, output_path=path_frame)
     plot_convergence(optimizer.cost_history, output_path=path_conv)
+    
+    # 1.5 水平荷载效应图 (如果需要)
+    from src.utils.report_generator import plot_seismic_load_diagram
+    if hasattr(grid, 'alpha_max') and grid.alpha_max > 0:
+        plot_seismic_load_diagram(grid, optimizer.model, output_path=path_seismic)
     
     # 2. Excel报表
     generate_excel_report(result, optimizer.model, db, output_path=path_excel)
@@ -111,7 +117,8 @@ def main():
     image_paths = {
         'pm': path_pm,
         'frame': path_frame,
-        'conv': path_conv
+        'conv': path_conv,
+        'seismic': path_seismic
     }
     generate_word_report(
         result, 

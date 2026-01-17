@@ -395,7 +395,7 @@ class SectionVerifier:
 
 
 # =============================================================================
-# 验证结果类（兼容 phase5/model_validator）
+# 验证结果类
 # =============================================================================
 
 from dataclasses import dataclass, field
@@ -445,8 +445,7 @@ def validate_optimization_result(grid: GridInput,
     """
     便捷函数：验证优化结果
     
-    基于 SectionVerifier 进行承载力验算，
-    提供与 phase5/model_validator 兼容的接口。
+    基于 SectionVerifier 进行承载力验算。
     
     Args:
         grid: 轴网配置

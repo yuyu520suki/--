@@ -1,11 +1,11 @@
 """
-GUI可视化界面模块 - 参数输入与2D框架预览
-基于 Tkinter 实现轻量级界面
+RC框架结构优化系统 - GUI界面
 
 功能:
 - 结构参数输入与校验
-- 实时2D框架几何可视化
-- 优化结果展示
+- 实时2D框架几何可视化  
+- 优化结果展示与导出
+- 承载力验证
 """
 
 import sys
@@ -629,7 +629,7 @@ class FrameOptimizerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         
-        self.title("RC框架结构优化系统 v1.0")
+        self.title("RC框架结构优化系统 v2.0 | GB 55001-2021")
         self.geometry("1100x650")
         self.minsize(900, 550)
         
@@ -681,12 +681,46 @@ class FrameOptimizerGUI(tk.Tk):
         
         ttk.Separator(toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
         
+        # 并行加速开关
+        self.parallel_var = tk.BooleanVar(value=True)  # 默认开启
+        self.parallel_check = ttk.Checkbutton(
+            toolbar, 
+            text="⚡ 并行加速", 
+            variable=self.parallel_var,
+            command=self._on_parallel_toggle
+        )
+        self.parallel_check.pack(side='left', padx=5)
+        
+        # 线程数选择
+        ttk.Label(toolbar, text="线程:").pack(side='left', padx=(5, 2))
+        self.workers_var = tk.IntVar(value=6)
+        self.workers_spin = ttk.Spinbox(
+            toolbar, 
+            from_=2, to=12, 
+            textvariable=self.workers_var,
+            width=3,
+            state='readonly'
+        )
+        self.workers_spin.pack(side='left')
+        
+        ttk.Separator(toolbar, orient='vertical').pack(side='left', fill='y', padx=10)
+        
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(toolbar, textvariable=self.status_var).pack(side='left')
         
         # 进度条
         self.progress = ttk.Progressbar(toolbar, mode='indeterminate', length=100)
         self.progress.pack(side='right', padx=5)
+    
+    def _on_parallel_toggle(self):
+        """并行开关切换回调"""
+        if self.parallel_var.get():
+            self.workers_spin.config(state='readonly')
+            self.status_var.set(f"已启用并行加速 ({self.workers_var.get()} 线程)")
+        else:
+            self.workers_spin.config(state='disabled')
+            self.status_var.set("已禁用并行加速 (串行模式)")
+    
     
     def _create_main_layout(self):
         """创建主布局"""
@@ -729,12 +763,24 @@ class FrameOptimizerGUI(tk.Tk):
                 from src.models.structure_model import StructureModel
                 from src.utils.report_generator import (
                     generate_excel_report, generate_word_report,
-                    plot_pm_diagrams, plot_frame_diagrams, plot_convergence
+                    plot_pm_diagrams, plot_frame_diagrams, plot_convergence,
+                    plot_seismic_load_diagram
                 )
                 
                 grid = self.param_panel.get_grid_input()
+                
+                # 读取并行设置
+                use_parallel = self.parallel_var.get()
+                n_workers = self.workers_var.get()
+                
                 optimizer = FrameOptimizer(grid, self.db)
-                result = optimizer.run(num_generations=100, sol_per_pop=50, random_seed=42)
+                result = optimizer.run(
+                    num_generations=100, 
+                    sol_per_pop=50, 
+                    random_seed=42,
+                    parallel=use_parallel,
+                    n_workers=n_workers
+                )
                 
                 self.result = result
                 
@@ -758,11 +804,17 @@ class FrameOptimizerGUI(tk.Tk):
                 plot_frame_diagrams(result, model, grid, str(output_dir / "框架内力图.png"))
                 plot_convergence(result.convergence_history, str(output_dir / "收敛曲线.png"))
                 
+                # 生成地震/水平荷载效应图 (如果有水平荷载)
+                if (hasattr(grid, 'alpha_max') and grid.alpha_max > 0) or \
+                   (hasattr(grid, 'w0') and grid.w0 > 0):
+                    plot_seismic_load_diagram(grid, model, str(output_dir / "水平荷载效应图.png"))
+                
                 # 生成报告
                 image_paths = {
                     'pm': str(output_dir / "PM曲线图.png"),
                     'frame': str(output_dir / "框架内力图.png"),
                     'conv': str(output_dir / "收敛曲线.png"),
+                    'seismic': str(output_dir / "水平荷载效应图.png"),
                 }
                 generate_excel_report(result, model, self.db, str(output_dir / "优化结果.xlsx"))
                 generate_word_report(result, model, self.db, grid, 
