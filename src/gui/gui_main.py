@@ -488,6 +488,8 @@ class ResultPanel(ttk.LabelFrame):
                   command=self._show_pm_curve).pack(side='left', padx=2)
         ttk.Button(self.btn_frame1, text="收敛曲线",
                   command=self._show_convergence).pack(side='left', padx=2)
+        ttk.Button(self.btn_frame1, text="水平荷载",
+                  command=self._show_seismic_diagram).pack(side='left', padx=2)
         
         # 操作按钮 - 第二行
         self.btn_frame2 = ttk.Frame(self)
@@ -554,6 +556,10 @@ class ResultPanel(ttk.LabelFrame):
     def _show_convergence(self):
         """显示收敛曲线"""
         self._open_file("收敛曲线.png")
+    
+    def _show_seismic_diagram(self):
+        """显示水平荷载效应图"""
+        self._open_file("水平荷载效应图.png")
     
     def _open_report(self):
         """打开计算书"""
