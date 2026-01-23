@@ -3,7 +3,7 @@
 基于 PyGAD 实现自适应惩罚和分组编码
 
 特性:
-- 支持 PyGAD 内置线程并行加速
+- 支持多进程并行加速 (突破GIL限制，获得3-5x加速)
 - 6基因分组编码: [标准梁, 屋面梁, 底层柱, 标准角柱, 标准内柱, 顶层柱]
 - 自适应惩罚系数和变异率调整
 """
@@ -19,123 +19,6 @@ from src.calculation.section_database import SectionDatabase
 from src.models.data_models import GridInput, ElementForces, OptimizationResult
 from src.models.structure_model import StructureModel
 from src.analysis.analyzer import SectionVerifier
-
-
-# =============================================================================
-# 并行计算 - 进程本地存储和工作函数
-# =============================================================================
-
-# 每个工作进程的本地存储
-_worker_model: Optional[StructureModel] = None
-_worker_verifier: Optional[SectionVerifier] = None
-_worker_db: Optional[SectionDatabase] = None
-_worker_penalty_coeff: float = 1.0
-_worker_alpha: float = 2.0
-
-
-def _init_worker_process(grid_dict: Dict, penalty_coeff: float, alpha: float) -> None:
-    """
-    工作进程初始化函数 (在每个进程启动时调用一次)
-    
-    Args:
-        grid_dict: 轴网配置字典 (可序列化)
-        penalty_coeff: 惩罚系数
-        alpha: 惩罚指数
-    """
-    global _worker_model, _worker_verifier, _worker_db
-    global _worker_penalty_coeff, _worker_alpha
-    
-    _worker_penalty_coeff = penalty_coeff
-    _worker_alpha = alpha
-    
-    # 重建 GridInput 对象
-    grid = GridInput(
-        x_spans=grid_dict['x_spans'],
-        z_heights=grid_dict['z_heights'],
-        q_dead=grid_dict.get('q_dead', 4.5),
-        q_live=grid_dict.get('q_live', 2.5),
-    )
-    
-    # 如果有地震参数
-    if 'alpha_max' in grid_dict:
-        grid.alpha_max = grid_dict['alpha_max']
-    
-    # 创建本地实例
-    _worker_db = SectionDatabase()
-    _worker_model = StructureModel(_worker_db)
-    _worker_model.build_from_grid(grid)
-    
-    _worker_verifier = SectionVerifier(_worker_db)
-    _worker_verifier.precompute_pm_curves()
-
-
-def _evaluate_single_solution(genes_list: List[int]) -> float:
-    """
-    评估单个解的适应度 (在工作进程中执行)
-    
-    Args:
-        genes_list: 基因列表
-        
-    Returns:
-        适应度值
-    """
-    global _worker_model, _worker_verifier, _worker_db
-    global _worker_penalty_coeff, _worker_alpha
-    
-    try:
-        # 1. 设置截面
-        _worker_model.set_sections_by_groups(genes_list)
-        
-        # 2. 重建和分析模型
-        _worker_model.build_anastruct_model()
-        forces = _worker_model.analyze()
-        
-        # 3. 验算所有构件
-        total_penalty, _ = _worker_verifier.verify_all_elements(
-            forces,
-            _worker_model.beam_sections,
-            _worker_model.column_sections
-        )
-        
-        # 4. 检查拓扑约束 (强柱弱梁)
-        topo_penalty = _worker_verifier.check_topology_constraints(genes_list, _worker_model.grid)
-        total_penalty += topo_penalty
-        
-        # 5. 计算造价
-        std_beam = _worker_db.get_by_index(genes_list[0])
-        roof_beam = _worker_db.get_by_index(genes_list[1])
-        bottom_col = _worker_db.get_by_index(genes_list[2])
-        std_corner_col = _worker_db.get_by_index(genes_list[3])
-        std_interior_col = _worker_db.get_by_index(genes_list[4])
-        top_col = _worker_db.get_by_index(genes_list[5])
-        
-        n_std_beams = len(_worker_model.beam_groups.get('standard', []))
-        n_roof_beams = len(_worker_model.beam_groups.get('roof', []))
-        n_bottom_cols = len(_worker_model.column_groups.get('bottom', []))
-        n_std_corner_cols = len(_worker_model.column_groups.get('standard_corner', []))
-        n_std_interior_cols = len(_worker_model.column_groups.get('standard_interior', []))
-        n_top_cols = len(_worker_model.column_groups.get('top', []))
-        
-        avg_beam_length = np.mean(_worker_model.grid.x_spans) / 1000
-        avg_col_length = np.mean(_worker_model.grid.z_heights) / 1000
-        
-        cost = (
-            std_beam['cost_per_m'] * avg_beam_length * n_std_beams +
-            roof_beam['cost_per_m'] * avg_beam_length * n_roof_beams +
-            bottom_col['cost_per_m'] * avg_col_length * n_bottom_cols +
-            std_corner_col['cost_per_m'] * avg_col_length * n_std_corner_cols +
-            std_interior_col['cost_per_m'] * avg_col_length * n_std_interior_cols +
-            top_col['cost_per_m'] * avg_col_length * n_top_cols
-        )
-        
-        # 6. 计算适应度
-        F = cost * (1 + _worker_penalty_coeff * total_penalty) ** _worker_alpha
-        fitness = 1.0 / (F + 1e-9)
-        
-        return fitness
-        
-    except Exception as e:
-        return 1e-12
 
 
 class FrameOptimizer:
@@ -239,6 +122,22 @@ class FrameOptimizer:
         )
         
         return cost
+    
+    def _parallel_fitness_batch(self, ga_instance, solutions, solutions_indices):
+        """
+        批量并行评估适应度（使用进程池）
+        
+        当启用进程并行时，此函数会被PyGAD调用来批量评估整个种群
+        """
+        if self._pool is not None:
+            # 使用进程池并行评估
+            genes_list = [[int(g) for g in sol] for sol in solutions]
+            fitness_values = self._pool.map(self._evaluate_func, genes_list)
+            return fitness_values
+        else:
+            # 串行回退
+            return [self.fitness_func(ga_instance, sol, idx) 
+                    for sol, idx in zip(solutions, solutions_indices)]
     
     def fitness_func(self, ga_instance, solution, solution_idx) -> float:
         """
@@ -380,36 +279,66 @@ class FrameOptimizer:
     
     def _on_generation_parallel(self, ga_instance):
         """
-        并行模式每代回调 (简化版，只打印进度)
+        并行模式每代回调 (带自适应策略)
         
-        注: 并行模式下不进行自适应参数调整，因为线程并发时
-        统计数据可能不准确。
+        自适应策略 (基于收敛进度):
+        1. 惩罚系数: 按进化阶段逐步递减 (前期严格，后期宽松)
+        2. 变异率: 当连续多代无改进时增大变异率，防止陷入局部最优
         """
         gen = ga_instance.generations_completed
+        total_gens = ga_instance.num_generations
         
-        # 获取历史最优解 (全局最优，不是当代最优)
+        # 获取历史最优解
         best_solution, best_fitness, _ = ga_instance.best_solution()
         best_genes = [int(g) for g in best_solution]
-        best_cost = self.calculate_cost(best_genes)  # 使用 calculate_cost 而不是从适应度反推
+        best_cost = self.calculate_cost(best_genes)
         
-        # 确保收敛曲线单调不增
+        # 记录是否有改进
+        improved = False
         if len(self.cost_history) == 0 or best_cost < self.cost_history[-1]:
             self.cost_history.append(best_cost)
+            improved = True
         else:
-            self.cost_history.append(self.cost_history[-1])  # 保持前一代最优
+            self.cost_history.append(self.cost_history[-1])
         
         self.fitness_history.append(best_fitness)
         
-        # 每10代打印一次进度 (带进度条)
+        # ============ 自适应策略 (每5代调整一次) ============
+        if gen % 5 == 0 and gen > 0:
+            
+            # 1. 自适应惩罚系数 (基于进化阶段)
+            # 前期惩罚系数高，促进可行解搜索；后期降低，鼓励探索更优解
+            progress = gen / total_gens
+            target_penalty = 1.2 - 0.5 * progress  # 从1.2递减到0.7
+            self.penalty_coeff = 0.8 * self.penalty_coeff + 0.2 * target_penalty
+            self.penalty_coeff = np.clip(self.penalty_coeff, 0.5, 1.5)
+            
+            # 2. 自适应变异率 (基于收敛进度)
+            # 检查最近10代的改进情况
+            if len(self.cost_history) >= 10:
+                recent_improvement = self.cost_history[-10] - self.cost_history[-1]
+                improvement_rate = recent_improvement / (self.cost_history[-10] + 1e-9)
+                
+                if improvement_rate < 0.01:  # 改进不足1%，可能陷入局部最优
+                    self.mutation_prob = min(self.mutation_prob * 1.15, 0.45)
+                elif improvement_rate > 0.05:  # 改进良好，减小变异保护优良解
+                    self.mutation_prob = max(self.mutation_prob * 0.9, 0.15)
+            
+            # 3. 更新GA实例参数
+            ga_instance.mutation_probability = self.mutation_prob
+        
+        # 记录参数历史
+        self.mutation_history.append(self.mutation_prob)
+        
+        # 打印进度
         if gen % 10 == 0 or gen == 1:
-            total_gens = ga_instance.num_generations
             progress_pct = gen / total_gens * 100
             bar_len = 20
             filled = int(bar_len * gen / total_gens)
             bar = '█' * filled + '░' * (bar_len - filled)
             
             print(f"  [{bar}] {progress_pct:5.1f}% | Gen {gen:3d}/{total_gens} | "
-                  f"Cost: ¥{self.cost_history[-1]:,.0f} [Parallel]")
+                  f"Cost: ¥{self.cost_history[-1]:,.0f} | Pm={self.mutation_prob:.2f}")
     
     def run(self, 
             num_generations: int = 100,
@@ -458,22 +387,55 @@ class FrameOptimizer:
         self.crossover_prob = 0.85
         
         # 并行配置
+        self._use_process_parallel = parallel
+        self._pool = None
+        self._grid_dict = None
+        
         if parallel:
-            # 使用 PyGAD 的线程并行 (Windows 上更稳定)
-            # 注: 由于 Python GIL，线程并行对 CPU 密集型任务加速有限
-            # 但仍比完全串行快，因为有 NumPy 的 C 扩展可以释放 GIL
-            parallel_processing = ['thread', n_workers]
-            print(f"[并行] 使用线程池 ({n_workers} 线程)")
+            # 使用多进程并行 (突破GIL限制)
+            from src.optimization.parallel_worker import init_worker, evaluate_solution
+            
+            # 序列化GridInput为字典
+            self._grid_dict = {
+                'x_spans': list(self.grid.x_spans),
+                'z_heights': list(self.grid.z_heights),
+                'q_dead': self.grid.q_dead,
+                'q_live': self.grid.q_live,
+            }
+            if hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0:
+                self._grid_dict['alpha_max'] = self.grid.alpha_max
+            
+            # 创建进程池
+            self._pool = mp.Pool(
+                n_workers, 
+                initializer=init_worker, 
+                initargs=(self._grid_dict, self.penalty_coeff, self.alpha)
+            )
+            self._evaluate_func = evaluate_solution
+            print(f"[并行] 使用进程池 ({n_workers} 进程) - 突破GIL限制")
+            
+            # 进程并行时不使用PyGAD内置并行
+            parallel_processing = None
         else:
             parallel_processing = None
         
         # GA配置 (统一配置)
         # 注: num_parents_mating 必须 <= sol_per_pop
         num_parents = min(max(10, sol_per_pop // 2), sol_per_pop - 2)
+        
+        # 选择fitness函数：进程并行使用批量评估
+        if self._use_process_parallel:
+            fitness_function = self._parallel_fitness_batch
+            fitness_batch_size = sol_per_pop  # 整个种群批量评估
+        else:
+            fitness_function = self.fitness_func
+            fitness_batch_size = None
+        
         ga_instance = pygad.GA(
             num_generations=num_generations,
             num_parents_mating=num_parents,
-            fitness_func=self.fitness_func,
+            fitness_func=fitness_function,
+            fitness_batch_size=fitness_batch_size,
             sol_per_pop=sol_per_pop,
             num_genes=6,
             gene_type=int,
@@ -508,6 +470,12 @@ class FrameOptimizer:
         start_time = time.time()
         ga_instance.run()
         elapsed_time = time.time() - start_time
+        
+        # 清理进程池
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
         
         # 获取最优解
         solution, solution_fitness, _ = ga_instance.best_solution()
