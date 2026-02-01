@@ -127,12 +127,17 @@ class FrameOptimizer:
         """
         批量并行评估适应度（使用进程池）
         
-        当启用进程并行时，此函数会被PyGAD调用来批量评估整个种群
+        当启用进程并行时，此函数会被PyGAD调用来批量评估整个种群。
+        注意：每次评估都传递当前的惩罚系数，实现自适应惩罚策略在并行模式下的同步。
         """
         if self._pool is not None:
             # 使用进程池并行评估
-            genes_list = [[int(g) for g in sol] for sol in solutions]
-            fitness_values = self._pool.map(self._evaluate_func, genes_list)
+            # 将 (genes, penalty_coeff, alpha) 打包为元组传递
+            args_list = [
+                ([int(g) for g in sol], self.penalty_coeff, self.alpha)
+                for sol in solutions
+            ]
+            fitness_values = self._pool.map(self._evaluate_func, args_list)
             return fitness_values
         else:
             # 串行回退
@@ -275,7 +280,7 @@ class FrameOptimizer:
             
             print(f"  [{bar}] {progress_pct:5.1f}% | Gen {gen:3d}/{total_gens} | "
                   f"Cost: ¥{best_cost:,.0f} | Feasible: {feasible_ratio*100:.0f}% | "
-                  f"Pm={self.mutation_prob:.2f}")
+                  f"Pm={self.mutation_prob:.2f} | λ={self.penalty_coeff:.2f}")
     
     def _on_generation_parallel(self, ga_instance):
         """
@@ -338,7 +343,7 @@ class FrameOptimizer:
             bar = '█' * filled + '░' * (bar_len - filled)
             
             print(f"  [{bar}] {progress_pct:5.1f}% | Gen {gen:3d}/{total_gens} | "
-                  f"Cost: ¥{self.cost_history[-1]:,.0f} | Pm={self.mutation_prob:.2f}")
+                  f"Cost: ¥{self.cost_history[-1]:,.0f} | Pm={self.mutation_prob:.2f} | λ={self.penalty_coeff:.2f}")
     
     def run(self, 
             num_generations: int = 100,
@@ -557,14 +562,14 @@ if __name__ == "__main__":
     N_WORKERS = 6  # i7-12700H 推荐使用 6 个 P 核
     
     print("\n" + "=" * 70)
-    print("多核并行计算性能测试 (线程模式)")
+    print("多核并行计算性能测试 (进程模式)")
     print("=" * 70)
-    print(f"测试配置: {NUM_GEN} 代, 种群 {POP_SIZE}, 线程数 {N_WORKERS}")
+    print(f"测试配置: {NUM_GEN} 代, 种群 {POP_SIZE}, 进程数 {N_WORKERS}")
     
     db = SectionDatabase()
     
     # 1. 并行模式测试
-    print("\n>>> 测试 1: 并行模式 (6线程)")
+    print("\n>>> 测试 1: 并行模式 (6进程)")
     optimizer1 = FrameOptimizer(grid, db)
     t1_start = time.time()
     result1 = optimizer1.run(

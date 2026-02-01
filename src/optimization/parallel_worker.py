@@ -81,18 +81,31 @@ def init_worker(grid_dict: Dict, penalty_coeff: float = 1.0, alpha: float = 2.0)
     _worker_verifier.precompute_pm_curves()
 
 
-def evaluate_solution(genes_list: List[int]) -> float:
+def evaluate_solution(args) -> float:
     """
     评估单个解的适应度 (在工作进程中执行)
     
     Args:
-        genes_list: 基因列表 [标准梁, 屋面梁, 底层柱, 角柱, 内柱, 顶层柱]
+        args: 可以是以下两种格式之一：
+            - List[int]: 仅基因列表 (使用进程初始化时的惩罚系数)
+            - Tuple[List[int], float, float]: (基因列表, 惩罚系数, 惩罚指数)
         
     Returns:
         适应度值 (越大越好)
     """
     global _worker_model, _worker_verifier, _worker_db
     global _worker_penalty_coeff, _worker_alpha, _worker_grid
+    
+    # 解析参数：支持两种调用方式
+    if isinstance(args, tuple) and len(args) >= 2:
+        genes_list = args[0]
+        penalty_coeff = args[1]
+        alpha = args[2] if len(args) > 2 else _worker_alpha
+    else:
+        # 兼容旧的调用方式
+        genes_list = args
+        penalty_coeff = _worker_penalty_coeff
+        alpha = _worker_alpha
     
     try:
         # 1. 设置截面
@@ -140,8 +153,8 @@ def evaluate_solution(genes_list: List[int]) -> float:
             top_col['cost_per_m'] * avg_col_length * n_top_cols
         )
         
-        # 6. 计算适应度
-        F = cost * (1 + _worker_penalty_coeff * total_penalty) ** _worker_alpha
+        # 6. 计算适应度 (使用传入的惩罚系数)
+        F = cost * (1 + penalty_coeff * total_penalty) ** alpha
         fitness = 1.0 / (F + 1e-9)
         
         return fitness

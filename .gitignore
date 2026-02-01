@@ -28,30 +28,56 @@ wheels/
 venv/
 ENV/
 
-# IDE
+# IDE and editor config
 .idea/
 .vscode/
 *.swp
 *.swo
+.agent/
 
 # Output files
 output/
 *.xlsx
 *.docx
 *.png
+*.pdf
 
-# 隐私文件 - 毕业设计说明书相关
+# 毕业设计说明书相关（不上传）
 毕业设计说明书*.md
 毕业设计说明书*.docx
 *_初稿.md
 *_预处理.md
-convert_to_word.py
-generate_diagrams.py
-test_parallel_perf.py
+造价构成说明*.docx
+参数敏感性分析结果.xlsx
+sensitivity_results.json
+sensitivity_results.txt
 
-# Temporary files
+# 格式模板和转换脚本
+格式示范.doc
+convert_to_word*.py
+extract_format*.py
+format_specs*.txt
+convert_pandoc.py
+reference.docx
+
+# 图片生成脚本和生成的图片
+generate_*.py
+fig_*.png
+Gemini_Generated_Image*.png
+
+# 测试脚本
+sensitivity_test.py
+test_*.py
+
+# 规范文档
+GB*.md
+规范.pdf
+
+# 临时和废弃文件
+次品/
 *.tmp
 *.log
+~$*
 
 # OS files
 .DS_Store

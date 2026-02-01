@@ -232,10 +232,14 @@ class SectionVerifier:
                 sec_idx = col_sections.get(elem_id, 40)
                 
                 # 同时验算最大压力和最大拉力工况
-                P_comp = -f.axial_min 
+                # 符号约定说明：
+                # - anaStruct 使用拉正压负约定（柱向下压缩时轴力为负）
+                # - axial_min（最负值）对应最大压力
+                # - 取负号后转换为"压正"，符合 P-M 曲线的常用约定
+                P_comp = -f.axial_min   # 最大压力（正值）
                 pen_comp = self.check_column_capacity(sec_idx, P_comp, f.M_design)
                 
-                P_tens = -f.axial_max
+                P_tens = -f.axial_max   # 最大拉力（可能为负值）
                 pen_tens = self.check_column_capacity(sec_idx, P_tens, f.M_design)
                 
                 penalties[elem_id] = max(pen_comp, pen_tens)
