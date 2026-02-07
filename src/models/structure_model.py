@@ -412,6 +412,479 @@ class StructureModel:
         
         return forces
     
+    def analyze_uls_envelope(self) -> Dict[int, ElementForces]:
+        """
+        分析关键ULS组合并返回内力包络（优化用）
+        
+        分析5个关键组合以覆盖主要工况：
+        1. 1.3G + 1.5L（基本组合）
+        2. 1.2G + 0.6L + 1.3EQ（地震正向）
+        3. 1.2G + 0.6L - 1.3EQ（地震反向）
+        4. 1.2G + 0.6L + 1.4W（风荷载正向）
+        5. 1.2G + 0.6L - 1.4W（风荷载反向）
+        
+        Returns:
+            Dict[int, ElementForces]: 各构件的内力包络结果
+        """
+        if not self.grid:
+            raise ValueError("模型尚未初始化，请先调用 build_from_grid()")
+        
+        # 定义关键组合的荷载系数
+        combinations = [
+            {'name': '1.3G+1.5L', 'dead': 1.3, 'live': 1.5, 'seismic': 0.0, 'wind': 0.0},
+            {'name': '1.0G+1.5L', 'dead': 1.0, 'live': 1.5, 'seismic': 0.0, 'wind': 0.0},  # 恒载有利
+        ]
+        
+        # 当alpha_max > 0时考虑地震组合
+        has_seismic = hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0
+        if has_seismic:
+            combinations.extend([
+                {'name': '1.2G+0.6L+1.3EQ', 'dead': 1.2, 'live': 0.6, 'seismic': 1.3, 'wind': 0.0},
+                {'name': '1.2G+0.6L-1.3EQ', 'dead': 1.2, 'live': 0.6, 'seismic': -1.3, 'wind': 0.0},
+            ])
+        
+        # 当w0 > 0时考虑风荷载组合 (系数1.5匹配PKPM)
+        has_wind = hasattr(self.grid, 'w0') and self.grid.w0 > 0
+        if has_wind:
+            combinations.extend([
+                {'name': '1.2G+0.6L+1.5W', 'dead': 1.2, 'live': 0.6, 'seismic': 0.0, 'wind': 1.5},
+                {'name': '1.2G+0.6L-1.5W', 'dead': 1.2, 'live': 0.6, 'seismic': 0.0, 'wind': -1.5},
+                # 风控制组合 (PKPM组合30-31)
+                {'name': '1.3G+1.05L+1.5W', 'dead': 1.3, 'live': 1.05, 'seismic': 0.0, 'wind': 1.5},
+                {'name': '1.3G+1.05L-1.5W', 'dead': 1.3, 'live': 1.05, 'seismic': 0.0, 'wind': -1.5},
+            ])
+        
+        # 初始化包络结果
+        envelope = {}
+        for elem_id in list(self.beams.keys()) + list(self.columns.keys()):
+            if elem_id in self.beams:
+                start, end = self.beams[elem_id]
+                elem_type = 'beam'
+            else:
+                start, end = self.columns[elem_id]
+                elem_type = 'column'
+            
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            length = ((x2-x1)**2 + (z2-z1)**2)**0.5
+            
+            envelope[elem_id] = {
+                'type': elem_type,
+                'length': length,
+                'N_max': float('-inf'),
+                'N_min': float('inf'),
+                'M_max': float('-inf'),
+                'M_min': float('inf'),
+                'V_max': float('-inf'),
+                'V_min': float('inf'),
+            }
+        
+        # 分析每个组合并取包络
+        for combo in combinations:
+            try:
+                forces = self._analyze_single_combo(
+                    dead_factor=combo['dead'],
+                    live_factor=combo['live'],
+                    seismic_factor=combo.get('seismic', 0.0),
+                    wind_factor=combo.get('wind', 0.0)
+                )
+                
+                # 更新包络
+                for elem_id, f in forces.items():
+                    env = envelope[elem_id]
+                    env['N_max'] = max(env['N_max'], f.axial_max)
+                    env['N_min'] = min(env['N_min'], f.axial_min)
+                    env['M_max'] = max(env['M_max'], f.moment_max)
+                    env['M_min'] = min(env['M_min'], f.moment_min)
+                    env['V_max'] = max(env['V_max'], abs(f.shear_max), abs(f.shear_min))
+                    env['V_min'] = min(env['V_min'], -abs(f.shear_max), -abs(f.shear_min))
+                    
+            except Exception as e:
+                # 组合分析失败，跳过
+                pass
+        
+        # 转换为 ElementForces 格式
+        result = {}
+        for elem_id, env in envelope.items():
+            result[elem_id] = ElementForces(
+                element_id=elem_id,
+                element_type=env['type'],
+                length=env['length'],
+                axial_max=env['N_max'] if env['N_max'] != float('-inf') else 0,
+                axial_min=env['N_min'] if env['N_min'] != float('inf') else 0,
+                shear_max=env['V_max'] if env['V_max'] != float('-inf') else 0,
+                shear_min=env['V_min'] if env['V_min'] != float('inf') else 0,
+                moment_max=env['M_max'] if env['M_max'] != float('-inf') else 0,
+                moment_min=env['M_min'] if env['M_min'] != float('inf') else 0,
+            )
+        
+        return result
+    
+    def _analyze_single_combo(self, dead_factor: float, live_factor: float, 
+                               seismic_factor: float = 0.0,
+                               wind_factor: float = 0.0) -> Dict[int, ElementForces]:
+        """
+        分析单个荷载组合
+        
+        Args:
+            dead_factor: 恒载系数
+            live_factor: 活载系数  
+            seismic_factor: 地震系数（正负表示方向）
+            wind_factor: 风荷载系数（正负表示方向）
+            
+        Returns:
+            内力结果字典
+        """
+        # 创建新的 SystemElements 实例
+        ss = SystemElements()
+        as_elem_map = {}
+        
+        # 获取材料参数
+        E = E_C * 1e6  # Pa
+        
+        # 逐层构建模型
+        num_cols = self.grid.num_spans + 1
+        
+        for story in range(self.grid.num_stories):
+            # 1. 添加底部柱（仅首层）
+            if story == 0:
+                for col_idx in range(num_cols):
+                    col_id = self._get_column_id(col_idx, story)
+                    if col_id not in self.column_sections:
+                        continue
+                    
+                    start, end = self.columns[col_id]
+                    x1, z1 = self.nodes[start]
+                    x2, z2 = self.nodes[end]
+                    
+                    sec_idx = self.column_sections[col_id]
+                    sec = self.db.get_by_index(sec_idx)
+                    b, h = sec['b'] / 1000, sec['h'] / 1000
+                    I = b * h**3 / 12
+                    A = b * h
+                    
+                    as_id = ss.add_element(
+                        location=[[x1/1000, z1/1000], [x2/1000, z2/1000]],
+                        EA=E * A,
+                        EI=E * I
+                    )
+                    as_elem_map[col_id] = as_id
+            
+            # 2. 添加本层梁
+            for span_idx in range(self.grid.num_spans):
+                beam_id = self._get_beam_id(span_idx, story)
+                if beam_id not in self.beam_sections:
+                    continue
+                
+                start, end = self.beams[beam_id]
+                x1, z1 = self.nodes[start]
+                x2, z2 = self.nodes[end]
+                
+                sec_idx = self.beam_sections[beam_id]
+                sec = self.db.get_by_index(sec_idx)
+                b, h = sec['b'] / 1000, sec['h'] / 1000
+                I = b * h**3 / 12
+                A = b * h
+                
+                as_id = ss.add_element(
+                    location=[[x1/1000, z1/1000], [x2/1000, z2/1000]],
+                    EA=E * A,
+                    EI=E * I
+                )
+                as_elem_map[beam_id] = as_id
+                
+                # 施加梁上均布荷载（恒载+活载组合）
+                is_roof = (story == self.grid.num_stories - 1)
+                q_live = self.grid.q_roof if (is_roof and hasattr(self.grid, 'q_roof')) else self.grid.q_live
+                q_total = dead_factor * self.grid.q_dead + live_factor * q_live
+                
+                ss.q_load(
+                    element_id=as_id,
+                    q=-q_total,  # 向下为负
+                    direction='element'
+                )
+            
+            # 3. 添加上一层柱（非首层）
+            if story < self.grid.num_stories - 1:
+                next_story = story + 1
+                for col_idx in range(num_cols):
+                    col_id = self._get_column_id(col_idx, next_story)
+                    if col_id not in self.column_sections:
+                        continue
+                    
+                    start, end = self.columns[col_id]
+                    x1, z1 = self.nodes[start]
+                    x2, z2 = self.nodes[end]
+                    
+                    sec_idx = self.column_sections[col_id]
+                    sec = self.db.get_by_index(sec_idx)
+                    b, h = sec['b'] / 1000, sec['h'] / 1000
+                    I = b * h**3 / 12
+                    A = b * h
+                    
+                    as_id = ss.add_element(
+                        location=[[x1/1000, z1/1000], [x2/1000, z2/1000]],
+                        EA=E * A,
+                        EI=E * I
+                    )
+                    as_elem_map[col_id] = as_id
+        
+        # 添加顶层柱
+        top_story = self.grid.num_stories - 1
+        for col_idx in range(num_cols):
+            col_id = self._get_column_id(col_idx, top_story)
+            if col_id in as_elem_map:
+                continue  # 已添加
+            if col_id not in self.column_sections:
+                continue
+            
+            start, end = self.columns[col_id]
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            
+            sec_idx = self.column_sections[col_id]
+            sec = self.db.get_by_index(sec_idx)
+            b, h = sec['b'] / 1000, sec['h'] / 1000
+            I = b * h**3 / 12
+            A = b * h
+            
+            as_id = ss.add_element(
+                location=[[x1/1000, z1/1000], [x2/1000, z2/1000]],
+                EA=E * A,
+                EI=E * I
+            )
+            as_elem_map[col_id] = as_id
+        
+        # 添加支座
+        for col_idx in range(num_cols):
+            x = sum(self.grid.x_spans[:col_idx]) if col_idx > 0 else 0
+            node_id = ss.find_node_id(vertex=[x/1000, 0])
+            if node_id is not None:
+                ss.add_support_fixed(node_id=node_id)
+        
+        # 施加地震力（如果有）
+        if abs(seismic_factor) > 0.01 and hasattr(self.grid, 'alpha_max') and self.grid.alpha_max > 0:
+            self._apply_seismic_to_model(ss, as_elem_map, seismic_factor)
+        
+        # 施加风荷载（如果有）
+        if abs(wind_factor) > 0.01 and hasattr(self.grid, 'w0') and self.grid.w0 > 0:
+            self._apply_wind_to_model(ss, wind_factor)
+        
+        # 求解
+        ss.solve()
+        
+        # 提取内力
+        forces = {}
+        for elem_id, as_id in as_elem_map.items():
+            results = ss.get_element_results(element_id=as_id)
+            
+            if elem_id in self.beams:
+                start, end = self.beams[elem_id]
+                elem_type = 'beam'
+            else:
+                start, end = self.columns[elem_id]
+                elem_type = 'column'
+            
+            x1, z1 = self.nodes[start]
+            x2, z2 = self.nodes[end]
+            length = ((x2-x1)**2 + (z2-z1)**2)**0.5
+            
+            forces[elem_id] = ElementForces(
+                element_id=elem_id,
+                element_type=elem_type,
+                length=length,
+                axial_max=results['Nmax'],
+                axial_min=results['Nmin'],
+                shear_max=results['Qmax'],
+                shear_min=results['Qmin'],
+                moment_max=results['Mmax'],
+                moment_min=results['Mmin'],
+            )
+        
+        return forces
+    
+    def _apply_seismic_to_model(self, ss: 'SystemElements', as_elem_map: Dict[int, int],
+                                 seismic_factor: float):
+        """
+        施加地震力到指定模型（与原 _apply_seismic_load 保持一致）
+        
+        Args:
+            ss: SystemElements 实例
+            as_elem_map: 元素ID映射
+            seismic_factor: 地震系数（含正负方向）
+        """
+        alpha_max = self.grid.alpha_max
+        if alpha_max <= 0:
+            return
+        
+        n_stories = self.grid.num_stories
+        psi_c = 0.5  # 活载组合系数
+        
+        # 计算各层重力荷载代表值
+        G_story = []
+        H_story = []
+        
+        cumulative_height = 0.0
+        for story in range(n_stories):
+            story_height = self.grid.z_heights[story] / 1000  # m
+            cumulative_height += story_height
+            H_story.append(cumulative_height)
+            
+            # 梁上荷载 = (恒载 + ψ_c × 活载) × 总跨度
+            is_roof = (story == n_stories - 1)
+            q_live = self.grid.q_roof if (is_roof and hasattr(self.grid, 'q_roof')) else self.grid.q_live
+            q_e = self.grid.q_dead + psi_c * q_live
+            total_span = sum(self.grid.x_spans) / 1000  # m
+            
+            G_beam = q_e * total_span
+            G_col = G_beam * 0.15  # 柱自重估算
+            G_story.append(G_beam + G_col)
+        
+        G_total = sum(G_story)
+        
+        # 估算基本周期
+        H = self.grid.total_height / 1000
+        T1 = 0.08 * H
+        
+        # 计算地震影响系数
+        Tg = 0.40
+        if T1 <= 0.1:
+            alpha = alpha_max
+        elif T1 <= Tg:
+            alpha = alpha_max
+        else:
+            alpha = alpha_max * (Tg / T1) ** 0.9
+        
+        # 总水平地震力 (含η=0.85调整系数)
+        eta = 0.85
+        F_EK = alpha * G_total * eta * abs(seismic_factor)
+        sign = 1 if seismic_factor > 0 else -1
+        
+        # 顶部附加地震作用
+        if T1 > 1.4 * Tg:
+            delta_n = min(0.08 * T1 + 0.07, 0.25)
+        else:
+            delta_n = 0.0
+        
+        F_top_extra = delta_n * F_EK
+        F_distribute = F_EK - F_top_extra
+        
+        # 按高度分配
+        sum_GH = sum(G_story[i] * H_story[i] for i in range(n_stories))
+        
+        F_story_list = []
+        for i in range(n_stories):
+            if sum_GH > 0:
+                F_i = F_distribute * (G_story[i] * H_story[i]) / sum_GH
+            else:
+                F_i = 0.0
+            if i == n_stories - 1:
+                F_i += F_top_extra
+            F_story_list.append(F_i)
+        
+        # 使用 node_map 迭代获取节点
+        heights_nodes = {}
+        for nid, node in ss.node_map.items():
+            z = round(node.vertex.y, 2)  # anaStruct y是垂直方向
+            if z not in heights_nodes:
+                heights_nodes[z] = []
+            heights_nodes[z].append(nid)
+        
+        sorted_heights = sorted([h for h in heights_nodes.keys() if h > 0.01])
+        
+        for i, height in enumerate(sorted_heights):
+            if i >= len(F_story_list):
+                break
+            
+            F_layer = F_story_list[i] * sign
+            if abs(F_layer) < 0.001:
+                continue
+            
+            nodes_at_height = heights_nodes.get(height, [])
+            if not nodes_at_height:
+                continue
+            
+            F_per_node = F_layer / len(nodes_at_height)
+            
+            for node_id in nodes_at_height:
+                try:
+                    ss.point_load(node_id=node_id, Fx=F_per_node)
+                except:
+                    pass
+
+    def _apply_wind_to_model(self, ss: 'SystemElements', wind_factor: float):
+        """
+        施加风荷载到模型 (GB 50009-2012)
+        
+        Args:
+            ss: SystemElements 实例
+            wind_factor: 风荷载系数（含正负方向和分项系数）
+        """
+        w0 = getattr(self.grid, 'w0', 0)
+        if w0 <= 0:
+            return
+        
+        n_stories = self.grid.num_stories
+        sign = 1 if wind_factor > 0 else -1
+        gamma_w = abs(wind_factor)  # 分项系数已包含在wind_factor中
+        
+        # 收集各层节点
+        heights_nodes = {}
+        for nid, node in ss.node_map.items():
+            z = round(node.vertex.y, 2)
+            if z not in heights_nodes:
+                heights_nodes[z] = []
+            heights_nodes[z].append(nid)
+        
+        sorted_heights = sorted([h for h in heights_nodes.keys() if h > 0.01])
+        
+        # 计算各层风荷载
+        avg_span = sum(self.grid.x_spans) / len(self.grid.x_spans) / 1000  # m
+        H_total = self.grid.total_height / 1000  # m
+        
+        for i, height in enumerate(sorted_heights):
+            if i >= n_stories:
+                break
+            
+            # 风压高度变化系数 μz (B类地貌, GB 50009-2012 表8.2.1)
+            if height <= 10:
+                mu_z = 1.0
+            elif height <= 15:
+                mu_z = 1.0 + (1.14 - 1.0) * (height - 10) / 5
+            elif height <= 20:
+                mu_z = 1.14 + (1.25 - 1.14) * (height - 15) / 5
+            else:
+                mu_z = 1.25 + (height - 20) * 0.01  # 近似
+            
+            # 体型系数 (框架结构取1.3)
+            mu_s = 1.3
+            
+            # 该层风压 wk = μz × μs × w0
+            wk = mu_z * mu_s * w0  # kN/m²
+            
+            # 该层层高
+            if i == 0:
+                story_height = self.grid.z_heights[0] / 1000
+            else:
+                story_height = (self.grid.z_heights[i] if i < len(self.grid.z_heights) 
+                               else self.grid.z_heights[-1]) / 1000
+            
+            # 该层风荷载 = γw × wk × 层高 × 平均跨度
+            F_wind = gamma_w * wk * story_height * avg_span * sign  # kN
+            
+            nodes_at_height = heights_nodes.get(height, [])
+            if not nodes_at_height:
+                continue
+            
+            F_per_node = F_wind / len(nodes_at_height)
+            
+            for node_id in nodes_at_height:
+                try:
+                    ss.point_load(node_id=node_id, Fx=F_per_node)
+                except:
+                    pass
+
+    
     def get_summary(self) -> str:
         """获取模型摘要"""
         if not self.grid:

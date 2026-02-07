@@ -113,7 +113,7 @@ def evaluate_solution(args) -> float:
         
         # 2. 重建和分析模型
         _worker_model.build_anastruct_model()
-        forces = _worker_model.analyze()
+        forces = _worker_model.analyze_uls_envelope()
         
         # 3. 验算所有构件
         total_penalty, _ = _worker_verifier.verify_all_elements(

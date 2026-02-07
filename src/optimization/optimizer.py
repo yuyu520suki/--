@@ -164,7 +164,7 @@ class FrameOptimizer:
             
             # 2. 重建和分析模型
             self.model.build_anastruct_model()
-            forces = self.model.analyze()
+            forces = self.model.analyze_uls_envelope()
             
             # 3. 验算所有构件 (承载力验算)
             total_penalty, _ = self.verifier.verify_all_elements(
@@ -492,7 +492,7 @@ class FrameOptimizer:
         # 解析最优解
         self.model.set_sections_by_groups(best_genes)
         self.model.build_anastruct_model()
-        forces = self.model.analyze()
+        forces = self.model.analyze_uls_envelope()
         
         # 从GA历史重建收敛记录 (仅当回调未记录时)
         # 注: 如果 on_generation 回调已经记录了历史，这里不需要再添加
